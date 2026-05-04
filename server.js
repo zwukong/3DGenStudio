@@ -1318,7 +1318,7 @@ function createTencentCloudClient({ secretId, secretKey, region }) {
 
 async function requestTencentCloud(client, action, params) {
   return await new Promise((resolve, reject) => {
-    client.request(action, JSON.stringify(params), (err, response) => {
+    client.request(action, params, (err, response) => {
       if (err) {
         reject(err);
         return;
@@ -1327,6 +1327,28 @@ async function requestTencentCloud(client, action, params) {
       resolve(response || {});
     });
   });
+}
+
+function createTencentDebugPayload(params = {}) {
+  const safePayload = { ...params };
+
+  if (typeof safePayload.ImageBase64 === 'string') {
+    safePayload.ImageBase64 = `[base64:${safePayload.ImageBase64.length} chars redacted]`;
+  }
+
+  return safePayload;
+}
+
+function getTencentCloudResponsePayload(response) {
+  if (response && typeof response === 'object') {
+    if (response.Response && typeof response.Response === 'object') {
+      return response.Response;
+    }
+
+    return response;
+  }
+
+  return {};
 }
 
 async function submitTencentCloudMeshGenerationJob(settings, {
@@ -1364,10 +1386,14 @@ async function submitTencentCloudMeshGenerationJob(settings, {
     params.PolygonType = polygonType;
   }
 
+  console.log('[TencentCloud][SubmitHunyuanTo3DProJob] request params:', JSON.stringify(createTencentDebugPayload(params), null, 2));
+
   const response = await requestTencentCloud(client, 'SubmitHunyuanTo3DProJob', params);
-  const payload = response?.Response || {};
+  console.log('[TencentCloud][SubmitHunyuanTo3DProJob] raw response:', JSON.stringify(response || {}, null, 2));
+  const payload = getTencentCloudResponsePayload(response);
 
   if (!payload.JobId) {
+    console.error('[TencentCloud][SubmitHunyuanTo3DProJob] missing JobId in payload:', JSON.stringify(payload, null, 2));
     throw new Error(payload.ErrorMessage || 'Tencent Cloud mesh generation did not return a job id');
   }
 
@@ -1387,7 +1413,7 @@ async function queryTencentCloudMeshGenerationJob(settings, { region, jobId } = 
   const response = await requestTencentCloud(client, 'QueryHunyuanTo3DProJob', {
     JobId: String(jobId || '').trim()
   });
-  const payload = response?.Response || {};
+  const payload = getTencentCloudResponsePayload(response);
 
   return {
     requestId: payload.RequestId || null,
