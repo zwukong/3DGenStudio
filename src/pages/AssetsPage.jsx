@@ -160,6 +160,21 @@ function buildMeshEditorPath(asset, returnTo = '/assets') {
   return `/mesh-editor?${query.toString()}`
 }
 
+function buildImageEditorPath(asset, returnTo = '/assets') {
+  const assetIdMatch = String(asset.id || '').match(/^library:(\d+)$/) || String(asset.id || '').match(/^(\d+)$/)
+  const inheritedProjectId = asset.projectId || asset.parentProjectId || null
+  const query = new URLSearchParams({
+    assetId: assetIdMatch?.[1] || '',
+    filePath: asset.filePath || asset.filename || '',
+    url: asset.url || '',
+    name: asset.name || 'Image',
+    projectId: inheritedProjectId ? String(inheritedProjectId) : '',
+    returnTo
+  })
+
+  return `/image-editor?${query.toString()}`
+}
+
 function WorkflowOptionSelector({
   title,
   items,
@@ -1510,7 +1525,20 @@ export default function AssetsPage() {
                             </div>
                           )}
                           <div className="asset-card__body">
-                            <h3 className="asset-card__name">{asset.name}</h3>
+                            <div className="asset-card__title-row">
+                              <h3 className="asset-card__name">{asset.name}</h3>
+                              {activeSection === 'images' && (
+                                <button
+                                  type="button"
+                                  className="asset-card__icon-btn asset-card__icon-btn--edit"
+                                  onClick={() => handleStartRenameAsset(asset)}
+                                  disabled={renamingAssetKey === `${asset.type}:${asset.filename}`}
+                                  title="Rename asset"
+                                >
+                                  <span className="material-symbols-outlined">edit</span>
+                                </button>
+                              )}
+                            </div>
                             <div className="asset-card__meta">
                               <span className={`asset-card__badge ${activeSection === 'meshes' ? 'asset-card__badge--secondary' : ''}`}>{asset.extension}</span>
                               <div className="asset-card__actions">
@@ -1549,18 +1577,31 @@ export default function AssetsPage() {
                                       EDIT
                                     </button>
                                   </>
+                                ) : activeSection === 'images' ? (
+                                  <>
+                                    <a href={asset.url} target="_blank" rel="noreferrer" className="asset-card__link">OPEN</a>
+                                    <button
+                                      type="button"
+                                      className="asset-card__link asset-card__link-btn"
+                                      onClick={() => navigate(buildImageEditorPath(asset))}
+                                    >
+                                      EDIT
+                                    </button>
+                                  </>
                                 ) : (
                                   <a href={asset.url} target="_blank" rel="noreferrer" className="asset-card__link">OPEN</a>
                                 )}
-                                <button
-                                  type="button"
-                                  className="asset-card__icon-btn asset-card__icon-btn--edit"
-                                  onClick={() => handleStartRenameAsset(asset)}
-                                  disabled={renamingAssetKey === `${asset.type}:${asset.filename}`}
-                                  title="Rename asset"
-                                >
-                                  <span className="material-symbols-outlined">edit</span>
-                                </button>
+                                {activeSection !== 'images' && (
+                                  <button
+                                    type="button"
+                                    className="asset-card__icon-btn asset-card__icon-btn--edit"
+                                    onClick={() => handleStartRenameAsset(asset)}
+                                    disabled={renamingAssetKey === `${asset.type}:${asset.filename}`}
+                                    title="Rename asset"
+                                  >
+                                    <span className="material-symbols-outlined">edit</span>
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   className="asset-card__icon-btn"
