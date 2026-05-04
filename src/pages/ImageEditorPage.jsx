@@ -34,6 +34,9 @@ const TOOLS = {
 
 const DEFAULT_ADJUST_VALUES = { blackPoint: 0, whitePoint: 255, contrast: 0, saturation: 0 }
 const DEFAULT_FILTER_VALUES = { blur: 0, sharpen: 0 }
+const MIN_ZOOM = 0.25
+const MAX_ZOOM = 8
+const ZOOM_STEP = 1.15
 
 function createLayerId() {
   return `image-layer-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -335,10 +338,14 @@ export default function ImageEditorPage() {
   const [pendingAssetParamId, setPendingAssetParamId] = useState(null)
   const [aiRunning, setAiRunning] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [zoom, setZoom] = useState(1)
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
 
   const displayCanvasRef = useRef(null)
   const canvasWrapperRef = useRef(null)
   const interactionRef = useRef({ active: false, last: null, pointerId: null, mode: null, layerId: null })
+  const panInteractionRef = useRef({ active: false, pointerId: null, lastX: 0, lastY: 0 })
+  const pointerPositionRef = useRef(null)
 
   const syncHistoryFlags = useCallback(() => {
     setCanUndo(historyUndoRef.current.length > 0)
@@ -579,6 +586,60 @@ export default function ImageEditorPage() {
     setMaskRevision(prev => prev + 1)
   }, [])
 
+  const resetView = useCallback(() => {
+    setZoom(1)
+    setPanOffset({ x: 0, y: 0 })
+    setCursorPreview(null)
+  }, [])
+
+  const zoomIn = useCallback(() => {
+    setZoom(prev => clamp(prev * ZOOM_STEP, MIN_ZOOM, MAX_ZOOM))
+    setCursorPreview(null)
+  }, [])
+
+  const zoomOut = useCallback(() => {
+    setZoom(prev => clamp(prev / ZOOM_STEP, MIN_ZOOM, MAX_ZOOM))
+    setCursorPreview(null)
+  }, [])
+
+  const handleCanvasWheel = useCallback((event) => {
+    event.preventDefault()
+    pointerPositionRef.current = { x: event.clientX, y: event.clientY }
+    const factor = event.deltaY < 0 ? ZOOM_STEP : (1 / ZOOM_STEP)
+    setZoom(prev => clamp(prev * factor, MIN_ZOOM, MAX_ZOOM))
+  }, [])
+
+  const handleShellPointerDown = useCallback((event) => {
+    if (event.button !== 1) return
+
+    event.preventDefault()
+    setCursorPreview(null)
+
+    panInteractionRef.current = {
+      active: true,
+      pointerId: event.pointerId,
+      lastX: event.clientX,
+      lastY: event.clientY
+    }
+
+    canvasWrapperRef.current?.setPointerCapture?.(event.pointerId)
+  }, [])
+
+  const finishPanInteraction = useCallback((pointerId) => {
+    const interaction = panInteractionRef.current
+    if (!interaction.active || interaction.pointerId !== pointerId) return
+
+    panInteractionRef.current = { active: false, pointerId: null, lastX: 0, lastY: 0 }
+  }, [])
+
+  const handleShellPointerUp = useCallback((event) => {
+    finishPanInteraction(event.pointerId)
+  }, [finishPanInteraction])
+
+  const handleShellPointerCancel = useCallback((event) => {
+    finishPanInteraction(event.pointerId)
+  }, [finishPanInteraction])
+
   const createEmptyCanvas = useCallback((width, height) => {
     const canvas = document.createElement('canvas')
     canvas.width = width
@@ -735,9 +796,75 @@ export default function ImageEditorPage() {
     }
   }, [])
 
+  const updateCursorPreviewAtPosition = useCallback((clientX, clientY) => {
+    if (!(toolGroup === 'paint' || (toolGroup === 'ai' && toolId === 'mask'))) {
+      setCursorPreview(null)
+      return
+    }
+
+    const canvas = displayCanvasRef.current
+    const shell = canvasWrapperRef.current
+    const rect = canvas?.getBoundingClientRect()
+    const shellRect = shell?.getBoundingClientRect()
+
+    if (!rect || !shellRect) {
+      setCursorPreview(null)
+      return
+    }
+
+    const scrollLeft = shell.scrollLeft || 0
+    const scrollTop = shell.scrollTop || 0
+
+    const insideCanvas = clientX >= rect.left
+      && clientX <= rect.right
+      && clientY >= rect.top
+      && clientY <= rect.bottom
+
+    if (!insideCanvas) {
+      setCursorPreview(null)
+      return
+    }
+
+    const diameter = toolGroup === 'paint' ? paintSize : maskSize
+    const scale = rect.width > 0 && canvas?.width > 0 ? rect.width / canvas.width : 1
+    let previewWidth = Math.max(1, diameter * scale)
+    let previewHeight = previewWidth
+    let previewBorderRadius = '999px'
+
+    if (toolGroup === 'paint' && paintBrushSource !== 'color' && brushImageRef.current) {
+      const brushWidth = brushImageRef.current.width || 1
+      const brushHeight = brushImageRef.current.height || 1
+      const aspect = brushWidth / brushHeight
+      if (aspect >= 1) {
+        previewWidth = Math.max(1, diameter * scale)
+        previewHeight = Math.max(1, (diameter * scale) / aspect)
+      } else {
+        previewHeight = Math.max(1, diameter * scale)
+        previewWidth = Math.max(1, (diameter * scale) * aspect)
+      }
+      previewBorderRadius = '8px'
+    }
+
+    setCursorPreview({
+      x: clientX - shellRect.left + scrollLeft,
+      y: clientY - shellRect.top + scrollTop,
+      width: previewWidth,
+      height: previewHeight,
+      borderRadius: previewBorderRadius,
+      mode: toolGroup,
+      color: toolGroup === 'paint' ? (paintMode === 'erase' ? '#ff716c' : '#8ff5ff') : '#8ff5ff'
+    })
+  }, [maskSize, paintBrushSource, paintMode, paintSize, toolGroup, toolId])
+
+  const updateCursorPreviewFromEvent = useCallback((event) => {
+    pointerPositionRef.current = { x: event.clientX, y: event.clientY }
+    updateCursorPreviewAtPosition(event.clientX, event.clientY)
+  }, [updateCursorPreviewAtPosition])
+
   const handleCanvasPointerDown = useCallback((event) => {
     if (!displayCanvasRef.current) return
     if (!(toolGroup === 'paint' || (toolGroup === 'ai' && toolId === 'mask'))) return
+    if (event.button !== 0) return
 
     const point = getPointInCanvas(event)
     if (!point) return
@@ -774,41 +901,12 @@ export default function ImageEditorPage() {
   }, [bumpMask, bumpRender, ensureEditableLayer, getPointInCanvas, pushUndoSnapshot, setFeedback, stampMask, stampPaint, toolGroup, toolId])
 
   const handleCanvasPointerMove = useCallback((event) => {
-    const canvas = displayCanvasRef.current
-    const shell = canvasWrapperRef.current
-    const rect = canvas?.getBoundingClientRect()
-    const shellRect = shell?.getBoundingClientRect()
-    if (rect && shellRect && (toolGroup === 'paint' || (toolGroup === 'ai' && toolId === 'mask'))) {
-      const diameter = toolGroup === 'paint' ? paintSize : maskSize
-      const scale = rect.width > 0 && canvas?.width > 0 ? rect.width / canvas.width : 1
-      let previewWidth = Math.max(1, diameter * scale)
-      let previewHeight = previewWidth
-      let previewBorderRadius = '999px'
-
-      if (toolGroup === 'paint' && paintBrushSource !== 'color' && brushImageRef.current) {
-        const brushWidth = brushImageRef.current.width || 1
-        const brushHeight = brushImageRef.current.height || 1
-        const aspect = brushWidth / brushHeight
-        if (aspect >= 1) {
-          previewWidth = Math.max(1, diameter * scale)
-          previewHeight = Math.max(1, (diameter * scale) / aspect)
-        } else {
-          previewHeight = Math.max(1, diameter * scale)
-          previewWidth = Math.max(1, (diameter * scale) * aspect)
-        }
-        previewBorderRadius = '8px'
-      }
-
-      setCursorPreview({
-        x: event.clientX - shellRect.left,
-        y: event.clientY - shellRect.top,
-        width: previewWidth,
-        height: previewHeight,
-        borderRadius: previewBorderRadius,
-        mode: toolGroup,
-        color: toolGroup === 'paint' ? (paintMode === 'erase' ? '#ff716c' : '#8ff5ff') : '#8ff5ff'
-      })
+    if (panInteractionRef.current.active) {
+      setCursorPreview(null)
+      return
     }
+
+    updateCursorPreviewFromEvent(event)
 
     const interaction = interactionRef.current
     if (!interaction.active) return
@@ -829,7 +927,26 @@ export default function ImageEditorPage() {
 
     interactionRef.current.last = point
     event.preventDefault()
-  }, [bumpMask, bumpRender, drawInterpolated, getPointInCanvas, maskSize, paintBrushSource, paintMode, paintSize, stampMask, stampPaint, toolGroup, toolId])
+  }, [bumpMask, bumpRender, drawInterpolated, getPointInCanvas, stampMask, stampPaint, updateCursorPreviewFromEvent])
+
+  const handleShellPointerMove = useCallback((event) => {
+    const interaction = panInteractionRef.current
+    if (interaction.active && interaction.pointerId === event.pointerId) {
+      event.preventDefault()
+
+      const deltaX = event.clientX - interaction.lastX
+      const deltaY = event.clientY - interaction.lastY
+
+      interaction.lastX = event.clientX
+      interaction.lastY = event.clientY
+
+      setPanOffset(prev => ({ x: prev.x + deltaX, y: prev.y + deltaY }))
+      setCursorPreview(null)
+      return
+    }
+
+    updateCursorPreviewFromEvent(event)
+  }, [updateCursorPreviewFromEvent])
 
   const finishPointerInteraction = useCallback((pointerId) => {
     if (!interactionRef.current.active) return
@@ -1284,6 +1401,7 @@ export default function ImageEditorPage() {
         setSelectedLayerId(baseLayerId)
         setCropValues({ x: 0, y: 0, width: baseCanvas.width, height: baseCanvas.height })
         setResizeValues({ width: baseCanvas.width, height: baseCanvas.height })
+        resetView()
         historyUndoRef.current = []
         historyRedoRef.current = []
         syncHistoryFlags()
@@ -1304,7 +1422,7 @@ export default function ImageEditorPage() {
     return () => {
       cancelled = true
     }
-  }, [createEmptyCanvas, imageSourceUrl, syncHistoryFlags])
+  }, [createEmptyCanvas, imageSourceUrl, resetView, syncHistoryFlags])
 
   useEffect(() => {
     const onKeyDown = event => {
@@ -1483,6 +1601,34 @@ export default function ImageEditorPage() {
   useEffect(() => {
     refreshCanvas()
   }, [maskRevision, refreshCanvas, renderRevision, toolGroup, toolId])
+
+  useEffect(() => {
+    const pointer = pointerPositionRef.current
+    if (!pointer) {
+      setCursorPreview(null)
+      return
+    }
+
+    updateCursorPreviewAtPosition(pointer.x, pointer.y)
+  }, [panOffset, updateCursorPreviewAtPosition, zoom])
+
+  useEffect(() => {
+    const shell = canvasWrapperRef.current
+    if (!shell) return undefined
+
+    const handleScroll = () => {
+      const pointer = pointerPositionRef.current
+      if (!pointer) {
+        setCursorPreview(null)
+        return
+      }
+
+      updateCursorPreviewAtPosition(pointer.x, pointer.y)
+    }
+
+    shell.addEventListener('scroll', handleScroll, { passive: true })
+    return () => shell.removeEventListener('scroll', handleScroll)
+  }, [updateCursorPreviewAtPosition])
 
   const renderToolControls = () => {
     if (toolGroup === 'edit' && toolId === 'crop') {
@@ -2088,7 +2234,27 @@ export default function ImageEditorPage() {
               {renderToolControls()}
             </aside>
 
-            <div className="image-editor-canvas-shell" ref={canvasWrapperRef}>
+            <div
+              className="image-editor-canvas-shell"
+              ref={canvasWrapperRef}
+              onPointerDown={handleShellPointerDown}
+              onPointerMove={handleShellPointerMove}
+              onPointerUp={handleShellPointerUp}
+              onPointerCancel={handleShellPointerCancel}
+            >
+              <div className="image-editor-zoom-controls">
+                <button type="button" className="image-editor-btn" onClick={zoomIn}>
+                  Zoom In
+                </button>
+                <button type="button" className="image-editor-btn" onClick={zoomOut}>
+                  Zoom Out
+                </button>
+                <button type="button" className="image-editor-btn" onClick={resetView}>
+                  Fit View
+                </button>
+                <span className="image-editor-zoom-label">{Math.round(zoom * 100)}%</span>
+              </div>
+
               {loading ? (
                 <div className="image-editor-loading">
                   <span className="material-symbols-outlined image-editor-spinner">progress_activity</span>
@@ -2098,6 +2264,11 @@ export default function ImageEditorPage() {
                 <canvas
                   ref={displayCanvasRef}
                   className="image-editor-canvas"
+                  style={{
+                    transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`,
+                    transformOrigin: 'center center'
+                  }}
+                  onWheel={handleCanvasWheel}
                   onPointerDown={handleCanvasPointerDown}
                   onPointerMove={handleCanvasPointerMove}
                   onPointerUp={handleCanvasPointerUp}

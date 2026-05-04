@@ -255,12 +255,36 @@
   justify-content: center;
   overflow: auto;
   padding: 1rem;
+  cursor: default;
+  overscroll-behavior: contain;
   background-image: linear-gradient(45deg, rgba(255, 255, 255, 0.025) 25%, transparent 25%),
     linear-gradient(-45deg, rgba(255, 255, 255, 0.025) 25%, transparent 25%),
     linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.025) 75%),
     linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.025) 75%);
   background-size: 22px 22px;
   background-position: 0 0, 0 11px, 11px -11px, -11px 0;
+}
+
+.image-editor-zoom-controls {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem;
+  border: 1px solid rgba(71, 72, 74, 0.35);
+  border-radius: 10px;
+  background: rgba(13, 14, 16, 0.82);
+  backdrop-filter: blur(6px);
+}
+
+.image-editor-zoom-label {
+  min-width: 52px;
+  text-align: right;
+  font-size: 0.74rem;
+  color: var(--on-surface-variant);
 }
 
 .image-editor-canvas {
@@ -272,6 +296,7 @@
   border: 1px solid rgba(143, 245, 255, 0.2);
   touch-action: none;
   cursor: crosshair;
+  will-change: transform;
 }
 
 .image-editor-cursor-preview {
