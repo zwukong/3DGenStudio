@@ -2,6 +2,7 @@ import { Fragment, useState, useEffect, useMemo, useRef, useCallback  } from 're
 import { useParams } from 'react-router-dom'
 import { useProjects } from '../context/ProjectContext'
 import { useSettings } from '../context/SettingsContext.shared'
+import { useNotifications } from '../context/NotificationContext'
 import Header from '../components/Header'
 import Footer from '../components/Footer'
 import Viewer from '../components/Viewer'
@@ -144,6 +145,7 @@ export default function KanbanPage() {
     subscribeToComfyWorkflowProgress
   } = useProjects()
   const { settings } = useSettings()
+  const { addNotification } = useNotifications()
   
   const [project, setProject] = useState(null)
   const [assets, setAssets] = useState([])
@@ -1513,7 +1515,14 @@ export default function KanbanPage() {
           }
         }))
         await refreshProjectAssets().catch(() => {})
-        showStatusMessage(response.error || 'Tencent Cloud mesh generation failed', 'error')
+        const failureMessage = response.error || 'Tencent Cloud mesh generation failed'
+        showStatusMessage(failureMessage, 'error')
+        addNotification({
+          title: 'Mesh generation failed',
+          message: failureMessage,
+          source: 'Tencent Cloud · Hunyuan3D Pro',
+          tone: 'error'
+        })
         return
       }
 
@@ -1537,7 +1546,14 @@ export default function KanbanPage() {
       showStatusMessage('Tencent Cloud mesh generation completed successfully.', 'success')
     } catch (err) {
       console.error('Failed to fetch Tencent Cloud mesh result:', err)
-      showStatusMessage(err.message || 'Failed to fetch Tencent Cloud mesh result', 'error')
+      const failureMessage = err.message || 'Failed to fetch Tencent Cloud mesh result'
+      showStatusMessage(failureMessage, 'error')
+      addNotification({
+        title: 'Mesh generation failed',
+        message: failureMessage,
+        source: 'Tencent Cloud · Hunyuan3D Pro',
+        tone: 'error'
+      })
     } finally {
       setImageEditPendingCardId(null)
     }
@@ -1878,13 +1894,26 @@ export default function KanbanPage() {
       await refreshProjectAssets().catch(refreshErr => {
         console.error('Failed to refresh project assets after action error:', refreshErr)
       })
-      showStatusMessage(err.message || (isMeshGenCard
+      const failureMessage = err.message || (isMeshGenCard
         ? 'Failed to run mesh generation'
         : isMeshEditCard
           ? 'Failed to run mesh edit'
           : isTexturingCard
             ? 'Failed to run mesh texturing'
-          : 'Failed to run image edit'), 'error')
+          : 'Failed to run image edit')
+
+      showStatusMessage(failureMessage, 'error')
+
+      if (isMeshGenCard && imageEditDraft?.mode === 'api') {
+        addNotification({
+          title: 'Mesh generation failed',
+          message: failureMessage,
+          source: isTencentMeshGenerationApi(imageEditDraft?.selectedApi)
+            ? 'Tencent Cloud · Hunyuan3D Pro'
+            : 'Mesh generation API',
+          tone: 'error'
+        })
+      }
     } finally {
       if (!keepRuntimeState) {
         closeImageEditProgressSubscription(card.id)

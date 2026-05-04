@@ -1,0 +1,57 @@
+{
+  "1": {
+    "inputs": {
+      "glb_path": ""
+    },
+    "class_type": "Trellis2LoadMesh",
+    "_meta": {
+      "title": "Trellis2 - Load Mesh"
+    }
+  },
+  "2": {
+    "inputs": {
+      "enableSharp": true,
+      "sharpAngle": 89,
+      "quad": false,
+      "enableSmoothing": false,
+      "scaleFactor": 1,
+      "fixedChartClusters": 0,
+      "alpha": 0.005,
+      "ilpMethod": "LEASTSQUARES",
+      "isometry": false,
+      "regularityQuadrilaterals": false,
+      "regularityNonQuadrilaterals": false,
+      "regularityNonQuadrilateralsWeight": 0.9,
+      "alignSingularities": false,
+      "alignSingularitiesWeight": 0.1,
+      "repeatLosingConstraintsIterations": false,
+      "repeatLosingConstraintsQuads": false,
+      "repeatLosingConstraintsNonQuads": false,
+      "repeatLosingConstraintsAlign": false,
+      "hardParityConstraint": false,
+      "flowConfig": "SIMPLE",
+      "mesh": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "QRemeshify",
+    "_meta": {
+      "title": "QRemeshify"
+    }
+  },
+  "3": {
+    "inputs": {
+      "filename_prefix": "QRemeshify",
+      "file_format": "glb",
+      "trimesh": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "Trellis2ExportMesh",
+    "_meta": {
+      "title": "Trellis2 - Export Mesh"
+    }
+  }
+}

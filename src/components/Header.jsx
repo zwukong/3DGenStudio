@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
+import { useNotifications } from '../context/NotificationContext'
 import './Header.css'
 import localVersionInfo from '../../version.json'
 
@@ -42,8 +43,21 @@ async function checkForAppUpdate() {
   }
 }
 
+function getNotificationCardToneClass(tone) {
+  if (tone === 'success') return 'header__notifications-card--success'
+  if (tone === 'warning' || tone === 'error') return 'header__notifications-card--warning'
+  return 'header__notifications-card--neutral'
+}
+
+function getNotificationIcon(tone) {
+  if (tone === 'success') return 'check_circle'
+  if (tone === 'warning' || tone === 'error') return 'error'
+  return 'info'
+}
+
 export default function Header({ showSearch = false, showCreateNew = false, onSettingsClick, title = '', centerTitle = false, searchValue = '', onSearchChange, searchPlaceholder = 'Search Assets' }) {
   const location = useLocation()
+  const { notifications, clearNotifications } = useNotifications()
   const [showNotifications, setShowNotifications] = useState(false)
   const [isCheckingVersion, setIsCheckingVersion] = useState(true)
   const [versionCheckError, setVersionCheckError] = useState('')
@@ -54,6 +68,8 @@ export default function Header({ showSearch = false, showCreateNew = false, onSe
     remoteMessage: '',
   })
   const notificationRef = useRef(null)
+  const hasAppNotifications = notifications.length > 0
+  const hasUnreadNotifications = versionStatus.hasUpdate || hasAppNotifications
 
   const isActive = (path) => location.pathname.startsWith(path)
 
@@ -154,15 +170,15 @@ export default function Header({ showSearch = false, showCreateNew = false, onSe
 
         <div className="header__actions">
           <button
-            className={`header__icon-btn ${versionStatus.hasUpdate ? 'header__icon-btn--update' : ''}`}
+            className={`header__icon-btn ${hasUnreadNotifications ? 'header__icon-btn--update' : ''}`}
             id="notifications-btn"
-            title={versionStatus.hasUpdate ? 'A new version is available' : 'Notifications'}
+            title={hasUnreadNotifications ? 'You have new notifications' : 'Notifications'}
             onClick={() => setShowNotifications(open => !open)}
             aria-label="Open notifications"
             aria-expanded={showNotifications}
           >
             <span className="material-symbols-outlined">notifications</span>
-            {versionStatus.hasUpdate && <span className="header__notif-dot" aria-hidden="true" />}
+            {hasUnreadNotifications && <span className="header__notif-dot" aria-hidden="true" />}
           </button>
           <button className="header__icon-btn" id="settings-btn" title="Settings" onClick={onSettingsClick}>
             <span className="material-symbols-outlined">settings</span>
@@ -173,15 +189,41 @@ export default function Header({ showSearch = false, showCreateNew = false, onSe
           <div className="header__notifications-pop" ref={notificationRef} role="dialog" aria-label="Notifications">
             <div className="header__notifications-head">
               <p className="header__notifications-title">App Notifications</p>
-              <button
-                type="button"
-                className="header__notifications-close"
-                onClick={() => setShowNotifications(false)}
-                aria-label="Close notifications"
-              >
-                <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>close</span>
-              </button>
+              <div className="header__notifications-head-actions">
+                {hasAppNotifications && (
+                  <button
+                    type="button"
+                    className="header__notifications-clear"
+                    onClick={clearNotifications}
+                  >
+                    Clear app alerts
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="header__notifications-close"
+                  onClick={() => setShowNotifications(false)}
+                  aria-label="Close notifications"
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>close</span>
+                </button>
+              </div>
             </div>
+
+            {notifications.map(notification => (
+              <div key={notification.id} className={`header__notifications-card ${getNotificationCardToneClass(notification.tone)}`}>
+                <span className="material-symbols-outlined">{getNotificationIcon(notification.tone)}</span>
+                <div>
+                  <p className="header__notifications-card-title">{notification.title}</p>
+                  {notification.source && (
+                    <p className="header__notifications-card-text">{notification.source}</p>
+                  )}
+                  {notification.message && (
+                    <p className="header__notifications-card-text">{notification.message}</p>
+                  )}
+                </div>
+              </div>
+            ))}
 
             {isCheckingVersion && (
               <div className="header__notifications-card header__notifications-card--neutral">

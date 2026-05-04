@@ -1,0 +1,461 @@
+{
+  "163": {
+    "inputs": {
+      "image": "Image_1024_00156_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "165": {
+    "inputs": {
+      "value": 0,
+      "width": [
+        "171",
+        0
+      ],
+      "height": [
+        "171",
+        1
+      ]
+    },
+    "class_type": "SolidMask",
+    "_meta": {
+      "title": "SolidMask"
+    }
+  },
+  "166": {
+    "inputs": {
+      "mask": [
+        "165",
+        0
+      ]
+    },
+    "class_type": "MaskToImage",
+    "_meta": {
+      "title": "Convert Mask to Image"
+    }
+  },
+  "168": {
+    "inputs": {
+      "mask": [
+        "164:75",
+        0
+      ]
+    },
+    "class_type": "InvertMask",
+    "_meta": {
+      "title": "InvertMask"
+    }
+  },
+  "169": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "offset_x": 0,
+      "offset_y": 0,
+      "destination": [
+        "163",
+        0
+      ],
+      "source": [
+        "166",
+        0
+      ],
+      "mask": [
+        "168",
+        0
+      ]
+    },
+    "class_type": "ImageComposite+",
+    "_meta": {
+      "title": "🔧 Image Composite"
+    }
+  },
+  "171": {
+    "inputs": {
+      "image": [
+        "163",
+        0
+      ]
+    },
+    "class_type": "GetImageSize+",
+    "_meta": {
+      "title": "🔧 Get Image Size"
+    }
+  },
+  "192": {
+    "inputs": {
+      "filename_prefix": "Qwen",
+      "images": [
+        "207:203",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "210": {
+    "inputs": {
+      "model": "RMBG-2.0",
+      "sensitivity": 1,
+      "process_res": 1024,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "invert_output": false,
+      "refine_foreground": false,
+      "background": "Alpha",
+      "background_color": "#000000",
+      "image": [
+        "169",
+        0
+      ]
+    },
+    "class_type": "RMBG",
+    "_meta": {
+      "title": "Remove Background (RMBG)"
+    }
+  },
+  "211": {
+    "inputs": {
+      "padding": 5,
+      "remove_background": false,
+      "max_size": 2048,
+      "image": [
+        "210",
+        0
+      ]
+    },
+    "class_type": "Trellis2PreProcessImage",
+    "_meta": {
+      "title": "Trellis2 - PreProcess Image"
+    }
+  },
+  "164:78": {
+    "inputs": {
+      "text": "Head",
+      "clip": [
+        "164:77",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "164:75": {
+    "inputs": {
+      "threshold": 0.5,
+      "refine_iterations": 3,
+      "individual_masks": false,
+      "model": [
+        "164:77",
+        0
+      ],
+      "image": [
+        "163",
+        0
+      ],
+      "conditioning": [
+        "164:78",
+        0
+      ]
+    },
+    "class_type": "SAM3_Detect",
+    "_meta": {
+      "title": "SAM3 Detect"
+    }
+  },
+  "164:77": {
+    "inputs": {
+      "ckpt_name": "sam3.1_multiplex_fp16.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "207:193": {
+    "inputs": {
+      "prompt": "",
+      "clip": [
+        "207:202",
+        0
+      ],
+      "vae": [
+        "207:199",
+        0
+      ],
+      "image1": [
+        "207:220",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus"
+    }
+  },
+  "207:197": {
+    "inputs": {
+      "reference_latents_method": "index_timestep_zero",
+      "conditioning": [
+        "207:196",
+        0
+      ]
+    },
+    "class_type": "FluxKontextMultiReferenceLatentMethod",
+    "_meta": {
+      "title": "Edit Model Reference Method"
+    }
+  },
+  "207:198": {
+    "inputs": {
+      "reference_latents_method": "index_timestep_zero",
+      "conditioning": [
+        "207:193",
+        0
+      ]
+    },
+    "class_type": "FluxKontextMultiReferenceLatentMethod",
+    "_meta": {
+      "title": "Edit Model Reference Method"
+    }
+  },
+  "207:199": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "207:200": {
+    "inputs": {
+      "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "strength_model": 1,
+      "model": [
+        "207:195",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Load LoRA"
+    }
+  },
+  "207:201": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "207:202": {
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "207:205": {
+    "inputs": {
+      "shift": 3.1,
+      "model": [
+        "207:200",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
+    }
+  },
+  "207:206": {
+    "inputs": {
+      "strength": 1,
+      "model": [
+        "207:205",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "CFGNorm"
+    }
+  },
+  "207:196": {
+    "inputs": {
+      "prompt": "Upscale the image",
+      "clip": [
+        "207:202",
+        0
+      ],
+      "vae": [
+        "207:199",
+        0
+      ],
+      "image1": [
+        "207:220",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "TextEncodeQwenImageEditPlus (Positive)"
+    }
+  },
+  "207:194": {
+    "inputs": {
+      "seed": 3382135155526,
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "207:206",
+        0
+      ],
+      "positive": [
+        "207:197",
+        0
+      ],
+      "negative": [
+        "207:198",
+        0
+      ],
+      "latent_image": [
+        "207:201",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "207:203": {
+    "inputs": {
+      "tile_size": 128,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8,
+      "samples": [
+        "207:194",
+        0
+      ],
+      "vae": [
+        "207:199",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE Decode (Tiled)"
+    }
+  },
+  "207:218": {
+    "inputs": {
+      "mask": [
+        "207:217",
+        0
+      ]
+    },
+    "class_type": "MaskToImage",
+    "_meta": {
+      "title": "Convert Mask to Image"
+    }
+  },
+  "207:219": {
+    "inputs": {
+      "red": 255,
+      "green": 255,
+      "blue": 255,
+      "threshold": 0,
+      "image": [
+        "211",
+        0
+      ]
+    },
+    "class_type": "MaskFromColor+",
+    "_meta": {
+      "title": "🔧 Mask From Color"
+    }
+  },
+  "207:220": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "offset_x": 0,
+      "offset_y": 0,
+      "destination": [
+        "211",
+        0
+      ],
+      "source": [
+        "207:218",
+        0
+      ],
+      "mask": [
+        "207:219",
+        0
+      ]
+    },
+    "class_type": "ImageComposite+",
+    "_meta": {
+      "title": "🔧 Image Composite"
+    }
+  },
+  "207:217": {
+    "inputs": {
+      "value": 0,
+      "width": [
+        "207:221",
+        0
+      ],
+      "height": [
+        "207:221",
+        1
+      ]
+    },
+    "class_type": "SolidMask",
+    "_meta": {
+      "title": "SolidMask"
+    }
+  },
+  "207:221": {
+    "inputs": {
+      "image": [
+        "211",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  },
+  "207:195": {
+    "inputs": {
+      "unet_name": "qwen-image-edit-2511-Q6_K.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  }
+}

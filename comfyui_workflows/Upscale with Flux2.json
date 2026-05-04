@@ -1,0 +1,350 @@
+{
+  "225": {
+    "inputs": {
+      "image": "Image_1024_00156_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "226": {
+    "inputs": {
+      "model": "RMBG-2.0",
+      "sensitivity": 1,
+      "process_res": 1024,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "invert_output": false,
+      "refine_foreground": false,
+      "background": "Alpha",
+      "background_color": "#000000",
+      "image": [
+        "225",
+        0
+      ]
+    },
+    "class_type": "RMBG",
+    "_meta": {
+      "title": "Remove Background (RMBG)"
+    }
+  },
+  "227": {
+    "inputs": {
+      "padding": 5,
+      "remove_background": false,
+      "max_size": 2048,
+      "image": [
+        "226",
+        0
+      ]
+    },
+    "class_type": "Trellis2PreProcessImage",
+    "_meta": {
+      "title": "Trellis2 - PreProcess Image"
+    }
+  },
+  "231": {
+    "inputs": {
+      "filename_prefix": "Flux2",
+      "images": [
+        "230:174",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "230:172": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "230:173": {
+    "inputs": {
+      "noise": [
+        "230:175",
+        0
+      ],
+      "guider": [
+        "230:177",
+        0
+      ],
+      "sampler": [
+        "230:172",
+        0
+      ],
+      "sigmas": [
+        "230:178",
+        0
+      ],
+      "latent_image": [
+        "230:188",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "230:176": {
+    "inputs": {
+      "clip_name": "qwen_3_8b_fp8mixed.safetensors",
+      "type": "flux2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "230:179": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "230:180": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "230:176",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode ( Negative Prompt)"
+    }
+  },
+  "230:183": {
+    "inputs": {
+      "conditioning": [
+        "230:189",
+        0
+      ],
+      "latent": [
+        "230:185",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "230:184": {
+    "inputs": {
+      "conditioning": [
+        "230:180",
+        0
+      ],
+      "latent": [
+        "230:185",
+        0
+      ]
+    },
+    "class_type": "ReferenceLatent",
+    "_meta": {
+      "title": "ReferenceLatent"
+    }
+  },
+  "230:188": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "230:190": {
+    "inputs": {
+      "unet_name": "flux-2-klein-9b-kv-fp8.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "230:178": {
+    "inputs": {
+      "steps": 8,
+      "width": 1024,
+      "height": 1024
+    },
+    "class_type": "Flux2Scheduler",
+    "_meta": {
+      "title": "Flux2Scheduler"
+    }
+  },
+  "230:177": {
+    "inputs": {
+      "cfg": 1.5,
+      "model": [
+        "230:190",
+        0
+      ],
+      "positive": [
+        "230:183",
+        0
+      ],
+      "negative": [
+        "230:184",
+        0
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFGGuider"
+    }
+  },
+  "230:189": {
+    "inputs": {
+      "text": "Upscale the image",
+      "clip": [
+        "230:176",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "230:175": {
+    "inputs": {
+      "noise_seed": 1080018651375883
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "230:174": {
+    "inputs": {
+      "samples": [
+        "230:173",
+        0
+      ],
+      "vae": [
+        "230:179",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "230:185": {
+    "inputs": {
+      "pixels": [
+        "230:215",
+        0
+      ],
+      "vae": [
+        "230:179",
+        0
+      ]
+    },
+    "class_type": "VAEEncode",
+    "_meta": {
+      "title": "VAE Encode"
+    }
+  },
+  "230:214": {
+    "inputs": {
+      "mask": [
+        "230:213",
+        0
+      ]
+    },
+    "class_type": "MaskToImage",
+    "_meta": {
+      "title": "Convert Mask to Image"
+    }
+  },
+  "230:215": {
+    "inputs": {
+      "x": 0,
+      "y": 0,
+      "offset_x": 0,
+      "offset_y": 0,
+      "destination": [
+        "227",
+        0
+      ],
+      "source": [
+        "230:214",
+        0
+      ],
+      "mask": [
+        "230:216",
+        0
+      ]
+    },
+    "class_type": "ImageComposite+",
+    "_meta": {
+      "title": "🔧 Image Composite"
+    }
+  },
+  "230:216": {
+    "inputs": {
+      "red": 255,
+      "green": 255,
+      "blue": 255,
+      "threshold": 0,
+      "image": [
+        "227",
+        0
+      ]
+    },
+    "class_type": "MaskFromColor+",
+    "_meta": {
+      "title": "🔧 Mask From Color"
+    }
+  },
+  "230:213": {
+    "inputs": {
+      "value": 0,
+      "width": [
+        "230:223",
+        0
+      ],
+      "height": [
+        "230:223",
+        1
+      ]
+    },
+    "class_type": "SolidMask",
+    "_meta": {
+      "title": "SolidMask"
+    }
+  },
+  "230:223": {
+    "inputs": {
+      "image": [
+        "227",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "Get Image Size"
+    }
+  }
+}

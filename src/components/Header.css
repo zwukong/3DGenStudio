@@ -217,6 +217,12 @@
   margin-bottom: 0.6rem;
 }
 
+.header__notifications-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
 .header__notifications-title {
   margin: 0;
   font-family: var(--font-headline);
@@ -242,6 +248,24 @@
 .header__notifications-close:hover {
   color: var(--on-surface);
   background: rgba(255, 255, 255, 0.07);
+}
+
+.header__notifications-clear {
+  border: 1px solid rgba(143, 245, 255, 0.3);
+  border-radius: 999px;
+  background: rgba(143, 245, 255, 0.08);
+  color: var(--primary);
+  font-family: var(--font-label);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.22rem 0.6rem;
+  cursor: pointer;
+}
+
+.header__notifications-clear:hover {
+  background: rgba(143, 245, 255, 0.14);
+  color: var(--on-surface);
 }
 
 .header__notifications-card {

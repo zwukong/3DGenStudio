@@ -21,6 +21,7 @@ import SettingsModal from '../components/SettingsModal'
 import Viewer from '../components/Viewer'
 import { useProjects } from '../context/ProjectContext'
 import { useSettings } from '../context/SettingsContext.shared'
+import { useNotifications } from '../context/NotificationContext'
 import { createMeshThumbnailFile } from '../utils/meshThumbnail'
 import '@xyflow/react/dist/style.css'
 import './KanbanPage.css'
@@ -321,6 +322,20 @@ function buildMeshEditorPath({ asset, projectId, nodeId, returnTo }) {
   })
 
   return `/mesh-editor?${query.toString()}`
+}
+
+function buildImageEditorPath({ asset, projectId, nodeId, returnTo }) {
+  const query = new URLSearchParams({
+    assetId: String(asset?.id || ''),
+    filePath: asset?.filePath || asset?.filename || '',
+    url: asset?.filename ? getAssetPreviewUrl(asset.filename) : '',
+    name: asset?.name || 'Image',
+    projectId: String(projectId || ''),
+    nodeId: String(nodeId || ''),
+    returnTo
+  })
+
+  return `/image-editor?${query.toString()}`
 }
 
 function buildEdgeId(connection) {
@@ -686,6 +701,14 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
         returnTo: `/projects/${data.projectId}`
       })
     : ''
+  const imageEditorPath = !isMeshGen && data.asset?.id
+    ? buildImageEditorPath({
+        asset: data.asset,
+        projectId: data.projectId,
+        nodeId: data.id,
+        returnTo: `/projects/${data.projectId}`
+      })
+    : ''
 
   useEffect(() => {
     updateNodeInternals(String(data.id))
@@ -1015,6 +1038,12 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               )}
               {meshEditorPath && (
                 <button className="image-card__edit-action-btn nodrag" onClick={() => navigate(meshEditorPath)}>
+                  <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>edit_square</span>
+                  Edit
+                </button>
+              )}
+              {imageEditorPath && (
+                <button className="image-card__edit-action-btn nodrag" onClick={() => navigate(imageEditorPath)}>
                   <span className="material-symbols-outlined" style={{ fontSize: '16px' }}>edit_square</span>
                   Edit
                 </button>
@@ -1861,6 +1890,7 @@ export default function GraphPage({ project }) {
     queryTencentMeshGenerationResult
   } = useProjects()
   const { settings } = useSettings()
+  const { addNotification } = useNotifications()
 
   const [showSettings, setShowSettings] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -1886,6 +1916,15 @@ export default function GraphPage({ project }) {
   const workflowsLoadedRef = useRef(false)
   const graphCanvasRef = useRef(null)
   const hasAutoFitOnLoadRef = useRef(false)
+
+  const pushMeshGenerationFailureNotification = useCallback((message, source = 'Mesh generation API') => {
+    addNotification({
+      title: 'Mesh generation failed',
+      message: message || 'Mesh generation request failed',
+      source,
+      tone: 'error'
+    })
+  }, [addNotification])
 
   const customApis = useMemo(() => settings?.apis?.custom || [], [settings])
   const imageGenerationApis = useMemo(() => ([
@@ -3128,6 +3167,10 @@ export default function GraphPage({ project }) {
                   progressDetail: err.message || 'Tencent Cloud mesh generation failed',
                   currentNodeLabel: 'Tencent Cloud job submission failed'
                 })
+                pushMeshGenerationFailureNotification(
+                  err.message || 'Tencent Cloud mesh generation failed',
+                  'Tencent Cloud · Hunyuan3D Pro'
+                )
               }
               return
             }
@@ -3155,6 +3198,7 @@ export default function GraphPage({ project }) {
               setActionDraftsByNodeId({})
             } catch (err) {
               await setProcessingState('error', null, { error: err.message || 'Mesh generation failed', inputSource: sourceReference })
+              pushMeshGenerationFailureNotification(err.message || 'Mesh generation failed', 'Mesh generation API')
             }
             return
           }
@@ -3492,16 +3536,18 @@ export default function GraphPage({ project }) {
           }
 
           if (response.status === 'error') {
+            const failureMessage = response.error || 'Tencent Cloud mesh generation failed'
             await setProcessingState('error', null, {
               ...runtimeMetadata,
               jobStatus: 'FAIL',
-              detail: response.error || 'Tencent Cloud mesh generation failed',
+              detail: failureMessage,
               currentNodeLabel: 'Tencent Cloud job failed',
-              error: response.error || 'Tencent Cloud mesh generation failed'
+              error: failureMessage
             }, {
-              progressDetail: response.error || 'Tencent Cloud mesh generation failed',
+              progressDetail: failureMessage,
               currentNodeLabel: 'Tencent Cloud job failed'
             })
+            pushMeshGenerationFailureNotification(failureMessage, 'Tencent Cloud · Hunyuan3D Pro')
             return
           }
 
@@ -3529,21 +3575,23 @@ export default function GraphPage({ project }) {
           }
           setActionDraftsByNodeId({})
         } catch (err) {
+          const failureMessage = err.message || 'Failed to fetch Tencent Cloud mesh result'
           await setProcessingState('error', null, {
             ...runtimeMetadata,
             jobStatus: 'FAIL',
-            detail: err.message || 'Failed to fetch Tencent Cloud mesh result',
+            detail: failureMessage,
             currentNodeLabel: 'Tencent Cloud result query failed',
-            error: err.message || 'Failed to fetch Tencent Cloud mesh result'
+            error: failureMessage
           }, {
-            progressDetail: err.message || 'Failed to fetch Tencent Cloud mesh result',
+            progressDetail: failureMessage,
             currentNodeLabel: 'Tencent Cloud result query failed'
           })
+          pushMeshGenerationFailureNotification(failureMessage, 'Tencent Cloud · Hunyuan3D Pro')
         }
       },
       onCloseAction: () => setActionDraftsByNodeId({})
     }
-  })}), [actionDraftsByNodeId, attachExistingAsset, closeNodeProgressSubscription, comfyLoading, createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createProjectConnection, edges, ensureComfyWorkflowsLoaded, ensureGeneratedMeshThumbnails, ensureLibraryLoaded, generateImage, getConnectedInputAssetFrom, handleCreateNode, handleNodeNameChange, handleNodeNameCommit, handleNodeOutputValueChange, handleNodeOutputValueCommit, imageEditApis, imageEditWorkflows, imageGenerationApis, imageGenerationWorkflows, libraryImageOptions, libraryLoading, meshGenerationApis, meshGenerationWorkflows, nodes, openActionDraft, project.id, queryTencentMeshGenerationResult, replaceFlowNodeData, runComfyWorkflow, runImageEditApi, runImageEditComfy, runMeshGenerationApi, setEdges, setNodeTransientData, setNodes, subscribeToComfyWorkflowProgress, updateProjectNode])
+  })}), [actionDraftsByNodeId, attachExistingAsset, closeNodeProgressSubscription, comfyLoading, createImageEditNodeDraft, createImageNodeDraft, createMeshGenNodeDraft, createProjectConnection, edges, ensureComfyWorkflowsLoaded, ensureGeneratedMeshThumbnails, ensureLibraryLoaded, generateImage, getConnectedInputAssetFrom, handleCreateNode, handleNodeNameChange, handleNodeNameCommit, handleNodeOutputValueChange, handleNodeOutputValueCommit, imageEditApis, imageEditWorkflows, imageGenerationApis, imageGenerationWorkflows, libraryImageOptions, libraryLoading, meshGenerationApis, meshGenerationWorkflows, nodes, openActionDraft, project.id, pushMeshGenerationFailureNotification, queryTencentMeshGenerationResult, replaceFlowNodeData, runComfyWorkflow, runImageEditApi, runImageEditComfy, runMeshGenerationApi, setEdges, setNodeTransientData, setNodes, subscribeToComfyWorkflowProgress, updateProjectNode])
 
   const handleFileUpload = useCallback(async (event) => {
     const file = event.target.files?.[0]

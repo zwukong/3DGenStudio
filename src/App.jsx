@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { ProjectProvider } from './context/ProjectContext'
 import { SettingsProvider } from './context/SettingsContext'
+import { NotificationProvider } from './context/NotificationContext'
 import ProjectsPage from './pages/ProjectsPage'
 import ProjectWorkspacePage from './pages/ProjectWorkspacePage'
 import AssetsPage from './pages/AssetsPage'
@@ -25,10 +26,12 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <SettingsProvider>
-      <ProjectProvider>
-        <AppRoutes />
-      </ProjectProvider>
-    </SettingsProvider>
+    <NotificationProvider>
+      <SettingsProvider>
+        <ProjectProvider>
+          <AppRoutes />
+        </ProjectProvider>
+      </SettingsProvider>
+    </NotificationProvider>
   )
 }
