@@ -281,7 +281,7 @@ function createComfyMaskCanvas(sourceMaskCanvas, bounds = null) {
 export default function ImageEditorPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const { getComfyWorkflows, runComfyWorkflow, subscribeToComfyWorkflowProgress } = useProjects()
+  const { getComfyWorkflows, runComfyWorkflow, subscribeToComfyWorkflowProgress, saveImageEditorFile } = useProjects()
 
   const [showSettings, setShowSettings] = useState(false)
   const [feedback, setFeedback] = useState('')
@@ -334,6 +334,7 @@ export default function ImageEditorPage() {
   const [showAssetSelector, setShowAssetSelector] = useState(false)
   const [pendingAssetParamId, setPendingAssetParamId] = useState(null)
   const [aiRunning, setAiRunning] = useState(false)
+  const [saving, setSaving] = useState(false)
 
   const displayCanvasRef = useRef(null)
   const canvasWrapperRef = useRef(null)
@@ -1202,6 +1203,38 @@ export default function ImageEditorPage() {
     }
   }, [bumpRender, createEmptyCanvas, exportCurrentComposite, imageName, imageParamSources, layers, loadAssetAsFile, maskHasPixels, projectId, pushUndoSnapshot, runComfyWorkflow, selectedWorkflow, subscribeToComfyWorkflowProgress, workflowValues])
 
+  const handleSaveImage = useCallback(async () => {
+    if (!numericAssetId) return
+    setSaving(true)
+    try {
+      const canvas = await exportCurrentComposite()
+      if (!canvas) return
+      const file = await canvasToPngFile(canvas, `${imageName || 'image'}.png`)
+      await saveImageEditorFile(numericAssetId, file, imageName, 'replace')
+      setFeedback('Image saved.')
+    } catch (err) {
+      setFeedback(`Save failed: ${err.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }, [exportCurrentComposite, imageName, numericAssetId, saveImageEditorFile])
+
+  const handleSaveNewVersion = useCallback(async () => {
+    if (!numericAssetId) return
+    setSaving(true)
+    try {
+      const canvas = await exportCurrentComposite()
+      if (!canvas) return
+      const file = await canvasToPngFile(canvas, `${imageName || 'image'}-edit.png`)
+      await saveImageEditorFile(numericAssetId, file, `${imageName || 'Image'} Edit`, 'version')
+      setFeedback('New version saved.')
+    } catch (err) {
+      setFeedback(`Save failed: ${err.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }, [exportCurrentComposite, imageName, numericAssetId, saveImageEditorFile])
+
   const handleExportPng = useCallback(async () => {
     const canvas = await exportCurrentComposite()
     if (!canvas) return
@@ -1971,6 +2004,18 @@ export default function ImageEditorPage() {
                 <span className="material-symbols-outlined">redo</span>
                 Redo
               </button>
+              {numericAssetId > 0 && (
+                <button type="button" className="image-editor-btn" onClick={handleSaveImage} disabled={loading || layers.length === 0 || saving}>
+                  <span className="material-symbols-outlined">save</span>
+                  Save Image
+                </button>
+              )}
+              {numericAssetId > 0 && (
+                <button type="button" className="image-editor-btn" onClick={handleSaveNewVersion} disabled={loading || layers.length === 0 || saving}>
+                  <span className="material-symbols-outlined">save_as</span>
+                  Save New Version
+                </button>
+              )}
               <button type="button" className="image-editor-btn image-editor-btn--primary" onClick={handleExportPng} disabled={loading || layers.length === 0}>
                 Export PNG
               </button>

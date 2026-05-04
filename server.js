@@ -3219,6 +3219,83 @@ app.post('/api/meshes/editor/save', meshEditorSaveUpload.single('meshFile'), asy
   }
 });
 
+app.post('/api/assets/image-editor/save', multer({ storage: multer.memoryStorage() }).single('imageFile'), async (req, res) => {
+  try {
+    const { assetId, saveMode = 'replace', name } = req.body || {};
+    const imageFile = req.file;
+
+    if (!imageFile?.buffer?.length) {
+      return res.status(400).json({ error: 'imageFile is required' });
+    }
+
+    if (!assetId) {
+      return res.status(400).json({ error: 'assetId is required' });
+    }
+
+    if (!['replace', 'version'].includes(saveMode)) {
+      return res.status(400).json({ error: 'saveMode must be replace or version' });
+    }
+
+    const sourceAsset = await getAssetRecordById(Number(assetId));
+    if (!sourceAsset) {
+      return res.status(404).json({ error: 'Image asset not found' });
+    }
+
+    if (String(sourceAsset.assetTypeName || '').toLowerCase() !== 'image') {
+      return res.status(400).json({ error: 'Selected asset is not an image' });
+    }
+
+    const nextName = String(name || '').trim() || sourceAsset.name || 'Image';
+    const { width, height } = getImageDimensionsFromBuffer(imageFile.buffer, { filename: 'image.png', mimeType: 'image/png' });
+
+    if (saveMode === 'replace') {
+      const storedFilePath = sourceAsset.filePath;
+      const absoluteFilePath = toAbsoluteStoragePath(storedFilePath);
+
+      await fs.mkdir(path.dirname(absoluteFilePath), { recursive: true });
+      await fs.writeFile(absoluteFilePath, imageFile.buffer);
+
+      const savedAsset = await replaceAssetFileById(sourceAsset.id, {
+        name: nextName,
+        type: 'image',
+        filePath: storedFilePath,
+        width,
+        height,
+        metadata: {
+          ...JSON.parse(sourceAsset.metadata || '{}'),
+          source: 'IMAGE EDITOR',
+          editedAt: Date.now()
+        }
+      });
+
+      return res.status(200).json(savedAsset);
+    }
+
+    // saveMode === 'version': save as new edit child of the root parent
+    const editId = `edit-${Date.now()}-${Math.round(Math.random() * 1E9)}`;
+    const storedFilePath = getImageEditStoredFilePath(sourceAsset, editId, 'png');
+    const absoluteFilePath = toAbsoluteStoragePath(storedFilePath);
+
+    await fs.mkdir(path.dirname(absoluteFilePath), { recursive: true });
+    await fs.writeFile(absoluteFilePath, imageFile.buffer);
+
+    const savedEdit = await createAssetEditRecord({
+      assetId: sourceAsset.id,
+      editId,
+      name: nextName,
+      filePath: storedFilePath,
+      width,
+      height,
+      createdAt: Date.now()
+    });
+
+    return res.status(201).json(savedEdit);
+  } catch (err) {
+    console.error('Failed to save image editor result:', err);
+    res.status(500).json({ error: err.message || 'Failed to save image editor result' });
+  }
+});
+
 app.post('/api/assets/link', async (req, res) => {
   try {
     const { projectId, filename, type = 'image', name, metadata } = req.body;

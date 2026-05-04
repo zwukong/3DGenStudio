@@ -811,19 +811,21 @@
 
 .asset-edit-card__body {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
+  flex-direction: column;
+  gap: 0.45rem;
   padding: 0.85rem;
 }
 
 .asset-edit-card__details {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
   min-width: 0;
-  flex: 1;
 }
 
 .asset-edit-card__title {
-  display: block;
+  flex: 1;
+  min-width: 0;
   color: var(--on-surface);
   font-size: 0.82rem;
   font-weight: 600;

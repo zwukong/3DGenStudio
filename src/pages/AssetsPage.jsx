@@ -953,8 +953,6 @@ export default function AssetsPage() {
                       <div className="asset-edit-card__body">
                         <div className="asset-edit-card__details">
                           <span className="asset-edit-card__title">{edit.name?.trim() || `Edit ${index + 1}`}</span>
-                        </div>
-                        <div className="asset-card__actions">
                           <button
                             type="button"
                             className="asset-card__icon-btn asset-card__icon-btn--edit"
@@ -964,6 +962,8 @@ export default function AssetsPage() {
                           >
                             <span className="material-symbols-outlined">edit</span>
                           </button>
+                        </div>
+                        <div className="asset-card__actions">
                           <button
                             type="button"
                             className="asset-card__icon-btn"
@@ -974,6 +974,14 @@ export default function AssetsPage() {
                             <span className="material-symbols-outlined">delete</span>
                           </button>
                           <a href={edit.url} target="_blank" rel="noreferrer" className="asset-card__link">OPEN</a>
+                          {editPreviewAsset.type === 'image' && (
+                            <button
+                              type="button"
+                              className="asset-card__link asset-card__link-btn"
+                              onClick={() => navigate(buildImageEditorPath({ ...edit, projectId: editPreviewAsset.projectId || edit.projectId }))}
+                              title="Open in Image Editor"
+                            >EDIT</button>
+                          )}
                         </div>
                       </div>
                     </article>

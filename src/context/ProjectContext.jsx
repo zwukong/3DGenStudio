@@ -513,6 +513,27 @@ export function ProjectProvider({ children }) {
     return data
   }
 
+  const saveImageEditorFile = async (assetId, file, name, saveMode = 'replace') => {
+    const formData = new FormData()
+    formData.append('imageFile', file)
+    formData.append('assetId', String(assetId))
+    formData.append('name', name || '')
+    formData.append('saveMode', saveMode)
+
+    const res = await fetch(`${API_BASE}/assets/image-editor/save`, {
+      method: 'POST',
+      body: formData
+    })
+
+    const data = await res.json().catch(() => ({}))
+
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to save image')
+    }
+
+    return data
+  }
+
   const uploadAsset = async (projectId, file, type = 'image', metadata = {}) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -812,6 +833,7 @@ export function ProjectProvider({ children }) {
       getProjectTasks,
       createTask,
       uploadAsset,
+      saveImageEditorFile,
       uploadAssetThumbnail,
       saveMeshEdit,
       getPaintDocument,
