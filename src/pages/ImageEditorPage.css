@@ -415,6 +415,11 @@
   width: 100%;
 }
 
+.image-editor-layer-card__row select {
+  color: var(--on-surface);
+  background-color: var(--surface-container);
+}
+
 @keyframes image-editor-spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
