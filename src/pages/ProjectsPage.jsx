@@ -19,6 +19,14 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v0.7.0',
+    date: '2026-05-04',
+    items: [
+      'Can generate Mesh using Tencent Cloud and Tripo AI',
+			'Image Editor : Added Zoom-In/Out feature'
+    ],
+  },
+  {
     version: 'v0.6.0',
     date: '2026-05-04',
     items: [
