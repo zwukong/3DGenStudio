@@ -1348,8 +1348,8 @@ function normalizeTripoMeshGenerationInput({
     throw new Error('Provide either a prompt or an image input for Tripo AI mesh generation');
   }
 
-  if (normalizedFaceLimit !== null && (normalizedFaceLimit < 1000 || normalizedFaceLimit > 300000)) {
-    throw new Error('Tripo AI face_limit must be between 1000 and 300000 when provided');
+  if (normalizedFaceLimit !== null && normalizedFaceLimit < 1000) {
+    throw new Error('Tripo AI face_limit must be at least 1000 when provided');
   }
 
   if (effectiveGenerateParts && (normalizedTexture || normalizedPbr || effectiveQuad)) {

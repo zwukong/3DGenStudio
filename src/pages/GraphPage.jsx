@@ -3875,7 +3875,10 @@ export default function GraphPage({ project }) {
             })
 
           if (response.status === 'processing') {
-            await setProcessingState('processing', null, {
+            const processingProgress = isTripoRuntime && Number.isFinite(response.progress)
+              ? Math.max(0, Math.min(100, Math.round(response.progress)))
+              : null
+            await setProcessingState('processing', processingProgress, {
               ...runtimeMetadata,
               selectedApi: response.selectedApi || runtimeMetadata.selectedApi,
               region: response.region || runtimeMetadata.region,
