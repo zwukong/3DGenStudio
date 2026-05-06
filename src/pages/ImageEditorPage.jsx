@@ -1028,7 +1028,7 @@ export default function ImageEditorPage() {
 
   const handleDeleteLayer = useCallback((id) => {
     const layer = layers.find(item => item.id === id)
-    if (!layer || layer.locked) {
+    if (!layer || layer.id === 'base-layer') {
       setFeedback('Base layer cannot be deleted.')
       return
     }
@@ -1517,7 +1517,7 @@ export default function ImageEditorPage() {
             opacity: 1,
             blendMode: 'source-over',
             visible: true,
-            locked: true
+            locked: false
           }
         ])
         setSelectedLayerId(baseLayerId)
@@ -2549,8 +2549,8 @@ export default function ImageEditorPage() {
                           <button
                             type="button"
                             className="image-editor-layer-card__icon-btn"
-                            title={layer.locked ? 'Base layer cannot be deleted' : 'Delete layer'}
-                            disabled={layer.locked}
+                            title={layer.id === 'base-layer' ? 'Base layer cannot be deleted' : 'Delete layer'}
+                            disabled={layer.id === 'base-layer'}
                             onClick={event => {
                               event.stopPropagation()
                               handleDeleteLayer(layer.id)
