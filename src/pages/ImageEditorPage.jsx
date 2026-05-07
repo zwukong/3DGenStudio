@@ -7,6 +7,7 @@ import AssetSelectorModal from '../components/AssetSelectorModal'
 import { useProjects } from '../context/ProjectContext'
 import { useNotifications } from '../context/NotificationContext'
 import { buildAssetUrl, createExecutionId } from '../utils/meshTexturing'
+import { applyShadowRemoverToCanvas, disposeShadowRemoverRenderer } from '../utils/shadowRemoverGPU'
 import './ImageEditorPage.css'
 
 const PAINT_BLEND_MODES = [
@@ -23,7 +24,8 @@ const TOOLS = {
     { id: 'crop', label: 'Crop', icon: 'crop' },
     { id: 'resize', label: 'Resize', icon: 'open_in_full' },
     { id: 'adjust', label: 'Levels / Contrast / Saturation', icon: 'tune' },
-    { id: 'filters', label: 'Blur / Sharpen', icon: 'blur_on' }
+    { id: 'filters', label: 'Blur / Sharpen', icon: 'blur_on' },
+    { id: 'shadow-remover', label: 'Shadow Remover', icon: 'light_mode' }
   ],
   paint: [
     { id: 'paint', label: 'Brush / Image Brush', icon: 'brush' }
@@ -35,6 +37,7 @@ const TOOLS = {
 
 const DEFAULT_ADJUST_VALUES = { blackPoint: 0, whitePoint: 255, contrast: 0, saturation: 0 }
 const DEFAULT_FILTER_VALUES = { blur: 0, sharpen: 0 }
+const DEFAULT_SHADOW_REMOVER_VALUES = { strength: 40, threshold: 32, softness: 18, midtoneProtection: 72 }
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 8
 const ZOOM_STEP = 1.15
@@ -309,8 +312,10 @@ export default function ImageEditorPage() {
   const [resizeValues, setResizeValues] = useState({ width: 0, height: 0 })
   const [adjustValues, setAdjustValues] = useState(DEFAULT_ADJUST_VALUES)
   const [filterValues, setFilterValues] = useState(DEFAULT_FILTER_VALUES)
+  const [shadowRemoverValues, setShadowRemoverValues] = useState(DEFAULT_SHADOW_REMOVER_VALUES)
   const [adjustPreviewDirty, setAdjustPreviewDirty] = useState(false)
   const [filterPreviewDirty, setFilterPreviewDirty] = useState(false)
+  const [shadowRemoverPreviewDirty, setShadowRemoverPreviewDirty] = useState(false)
 
   const [paintColor, setPaintColor] = useState('#ffffff')
   const [paintSize, setPaintSize] = useState(32)
@@ -552,6 +557,13 @@ export default function ImageEditorPage() {
         }
       }
 
+      if (layer.id === previewLayerId && toolGroup === 'edit' && toolId === 'shadow-remover' && shadowRemoverPreviewDirty) {
+        const previewResult = applyShadowRemoverToCanvas(originalLayerCanvas, shadowRemoverValues)
+        if (previewResult?.canvas) {
+          layerCanvas = previewResult.canvas
+        }
+      }
+
       if (!layerCanvas) return
       context.save()
       context.globalAlpha = clamp(layer.opacity, 0, 1)
@@ -613,7 +625,7 @@ export default function ImageEditorPage() {
       context.fillText(`X:${x}  Y:${y}  W:${width}  H:${height}`, x + 8, Math.max(0, y - 13))
       context.restore()
     }
-  }, [adjustPreviewDirty, adjustValues, cropValues.height, cropValues.width, cropValues.x, cropValues.y, filterPreviewDirty, filterValues, getPreviewTargetLayerId, layers, toolGroup, toolId])
+  }, [adjustPreviewDirty, adjustValues, cropValues.height, cropValues.width, cropValues.x, cropValues.y, filterPreviewDirty, filterValues, getPreviewTargetLayerId, layers, shadowRemoverPreviewDirty, shadowRemoverValues, toolGroup, toolId])
 
   const bumpRender = useCallback(() => {
     setRenderRevision(prev => prev + 1)
@@ -1254,6 +1266,33 @@ export default function ImageEditorPage() {
     setFeedback('Filter sliders reset.')
   }, [])
 
+  const handleApplyShadowRemover = useCallback(() => {
+    let fallbackMessage = ''
+
+    pushUndoSnapshot()
+    applyToLayerCanvas(layerCanvas => {
+      const result = applyShadowRemoverToCanvas(layerCanvas, shadowRemoverValues)
+      if (!result?.canvas) return
+      const context = layerCanvas.getContext('2d')
+      context.clearRect(0, 0, layerCanvas.width, layerCanvas.height)
+      context.drawImage(result.canvas, 0, 0)
+      fallbackMessage = result.mode === 'cpu' ? result.fallbackReason || 'GPU rendering was unavailable.' : ''
+    })
+
+    setShadowRemoverPreviewDirty(false)
+    setFeedback(
+      fallbackMessage
+        ? `Shadow remover applied using CPU fallback. ${fallbackMessage}`
+        : 'Shadow remover applied.'
+    )
+  }, [applyToLayerCanvas, pushUndoSnapshot, shadowRemoverValues])
+
+  const handleResetShadowRemover = useCallback(() => {
+    setShadowRemoverValues(DEFAULT_SHADOW_REMOVER_VALUES)
+    setShadowRemoverPreviewDirty(false)
+    setFeedback('Shadow remover sliders reset.')
+  }, [])
+
   const clearMask = useCallback(() => {
     const maskCanvas = maskCanvasRef.current
     if (!maskCanvas) return
@@ -1752,6 +1791,10 @@ export default function ImageEditorPage() {
     return () => shell.removeEventListener('scroll', handleScroll)
   }, [updateCursorPreviewAtPosition])
 
+  useEffect(() => () => {
+    disposeShadowRemoverRenderer()
+  }, [])
+
   const renderToolControls = () => {
     if (toolGroup === 'edit' && toolId === 'crop') {
       return (
@@ -1985,6 +2028,83 @@ export default function ImageEditorPage() {
               Apply Filters
             </button>
           </div>
+        </div>
+      )
+    }
+
+    if (toolGroup === 'edit' && toolId === 'shadow-remover') {
+      return (
+        <div className="image-editor-controls">
+          <label className="image-editor-label">
+            Strength ({shadowRemoverValues.strength}%)
+            <input
+              className="image-editor-input"
+              type="range"
+              min="0"
+              max="100"
+              value={shadowRemoverValues.strength}
+              onChange={event => {
+                setShadowRemoverValues(prev => ({ ...prev, strength: Number(event.target.value) }))
+                setShadowRemoverPreviewDirty(true)
+              }}
+            />
+          </label>
+
+          <label className="image-editor-label">
+            Shadow Threshold ({shadowRemoverValues.threshold}%)
+            <input
+              className="image-editor-input"
+              type="range"
+              min="0"
+              max="100"
+              value={shadowRemoverValues.threshold}
+              onChange={event => {
+                setShadowRemoverValues(prev => ({ ...prev, threshold: Number(event.target.value) }))
+                setShadowRemoverPreviewDirty(true)
+              }}
+            />
+          </label>
+
+          <label className="image-editor-label">
+            Edge Softness ({shadowRemoverValues.softness}%)
+            <input
+              className="image-editor-input"
+              type="range"
+              min="1"
+              max="100"
+              value={shadowRemoverValues.softness}
+              onChange={event => {
+                setShadowRemoverValues(prev => ({ ...prev, softness: Number(event.target.value) }))
+                setShadowRemoverPreviewDirty(true)
+              }}
+            />
+          </label>
+
+          <label className="image-editor-label">
+            Midtone Protection ({shadowRemoverValues.midtoneProtection}%)
+            <input
+              className="image-editor-input"
+              type="range"
+              min="0"
+              max="100"
+              value={shadowRemoverValues.midtoneProtection}
+              onChange={event => {
+                setShadowRemoverValues(prev => ({ ...prev, midtoneProtection: Number(event.target.value) }))
+                setShadowRemoverPreviewDirty(true)
+              }}
+            />
+          </label>
+
+          <div className="image-editor-toggle-row">
+            <button type="button" className="image-editor-btn" onClick={handleResetShadowRemover}>
+              Reset
+            </button>
+            <button type="button" className="image-editor-btn image-editor-btn--primary" onClick={handleApplyShadowRemover}>
+              Apply Shadow Remover
+            </button>
+          </div>
+
+          <p className="image-editor-help">Lifts low-luminance regions on the GPU when available and falls back to CPU if WebGL is unavailable.</p>
         </div>
       )
     }

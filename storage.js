@@ -2317,7 +2317,6 @@ export async function findLibraryAssetByFilePath(type, filePath) {
      WHERE at.name = ?
        AND a.parentId IS NULL
        AND a.filePath = ?
-       AND NOT EXISTS (SELECT 1 FROM Cards_Assets ca WHERE ca.assetId = a.id)
      ORDER BY a.creationDate DESC
      LIMIT 1`,
     [normalizeAssetTypeName(type), toStoredAssetPath(type, filePath)]
@@ -2744,10 +2743,7 @@ export async function updateWorkflowRecord(workflowId, { name, parameters = [], 
 export async function listLibraryAssetsByType(type, port) {
   const db = await getDb();
   const assetDirectory = getAssetDirectory(type);
-  const subdirectory = getAssetSubdirectory(type);
   await fs.mkdir(assetDirectory, { recursive: true });
-  const entries = await fs.readdir(assetDirectory, { withFileTypes: true });
-  const fileEntries = entries.filter(entry => entry.isFile());
   const rows = await all(
     db,
      `SELECT a.id, a.name, a.filePath, a.thumbnail, a.width, a.height, a.creationDate
@@ -2755,17 +2751,11 @@ export async function listLibraryAssetsByType(type, port) {
      JOIN AssetTypes at ON at.id = a.assetTypeId
      WHERE at.name = ?
        AND a.parentId IS NULL
-       AND NOT EXISTS (SELECT 1 FROM Cards_Assets ca WHERE ca.assetId = a.id)
      ORDER BY a.creationDate DESC`,
     [normalizeAssetTypeName(type)]
   );
 
-  const candidateStoredPaths = [
-    ...new Set([
-      ...rows.map(row => row.filePath),
-      ...fileEntries.map(entry => toStoredAssetPath(type, `${subdirectory}/${entry.name}`))
-    ])
-  ];
+  const candidateStoredPaths = [...new Set(rows.map(row => row.filePath).filter(Boolean))];
 
   const canonicalAssetRows = candidateStoredPaths.length > 0
     ? await all(
@@ -2798,7 +2788,6 @@ export async function listLibraryAssetsByType(type, port) {
   }, {});
 
   const childAssetRows = await listChildAssetsByParentFilePaths(db, candidateStoredPaths, normalizeAssetTypeName(type));
-  const childFilePaths = new Set(childAssetRows.map(row => row.filePath));
 
   const childrenBySourceFilePath = groupChildAssetsByParentFilePath(childAssetRows, port);
 
@@ -2849,44 +2838,7 @@ export async function listLibraryAssetsByType(type, port) {
     return accumulator;
   }, []);
 
-  const knownFilenames = new Set(dbAssets.map(asset => asset.filename));
-
-  const fileAssets = fileEntries
-    .filter(entry => {
-      const filename = `${subdirectory}/${entry.name}`;
-      const storedFilePath = toStoredAssetPath(type, filename);
-
-      return !knownFilenames.has(filename) && !childFilePaths.has(storedFilePath);
-    })
-    .sort((left, right) => right.name.localeCompare(left.name))
-    .map(entry => {
-      const filename = `${subdirectory}/${entry.name}`;
-      const storedFilePath = toStoredAssetPath(type, filename);
-      const assetChildren = childrenBySourceFilePath[storedFilePath] || [];
-      const canonicalAsset = canonicalAssetsByFilePath[storedFilePath];
-      const thumbnailFilename = canonicalAsset?.thumbnail ? toAssetUrlPath(canonicalAsset.thumbnail) : null;
-
-      return {
-        id: `file:${type}:${entry.name}`,
-        name: canonicalAsset?.name || entry.name,
-        filename,
-        filePath: storedFilePath,
-        projectId: canonicalAsset?.projectId ?? null,
-        type,
-        extension: path.extname(entry.name).replace('.', '').toUpperCase() || type.toUpperCase(),
-        url: `http://localhost:${port}/assets/${encodeURI(filename)}`,
-        width: canonicalAsset?.width ?? 0,
-        height: canonicalAsset?.height ?? 0,
-        thumbnailPath: canonicalAsset?.thumbnail || null,
-        thumbnailUrl: thumbnailFilename ? `http://localhost:${port}/assets/${encodeURI(thumbnailFilename)}` : null,
-        children: assetChildren,
-        childCount: assetChildren.length,
-        edits: assetChildren,
-        editCount: assetChildren.length
-      };
-    });
-
-  return [...dbAssets, ...fileAssets];
+  return dbAssets;
 }
 
 // ---------------------------------------------------------------------------
