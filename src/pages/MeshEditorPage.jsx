@@ -342,6 +342,7 @@ function deformGeometryWithBooleanStamp(baseGeometry, mask, stampMatrix, {
   operation = 'union',
   size = 0.2,
   depth = 0.06,
+  offset = 0.01,
   threshold = 24
 } = {}) {
   if (!baseGeometry?.attributes?.position || !mask || !stampMatrix) {
@@ -364,6 +365,7 @@ function deformGeometryWithBooleanStamp(baseGeometry, mask, stampMatrix, {
   const halfW = stampWidth * 0.5
   const halfH = stampHeight * 0.5
   const maxDepth = Math.max(1e-5, depth)
+  const hitSide = offset < 0 ? 1 : -1
 
   const invStamp = stampMatrix.clone().invert()
   const stampZ = new THREE.Vector3().setFromMatrixColumn(stampMatrix, 2).normalize()
@@ -397,9 +399,14 @@ function deformGeometryWithBooleanStamp(baseGeometry, mask, stampMatrix, {
     }
 
     const alphaWeight = alpha / 255
-    // Keep deformation localized around the hit plane, but allow some thickness.
-    const zDistance = Math.abs(localPoint.z)
-    const zFalloff = Math.max(0, 1 - zDistance / (maxDepth * 1.5))
+    // Only deform the side of the plane where the stamp was placed.
+    // This avoids opposite-side vertices being pushed the other way on thin meshes.
+    const sideDistance = localPoint.z * hitSide
+    if (sideDistance < 0) {
+      continue
+    }
+
+    const zFalloff = Math.max(0, 1 - sideDistance / (maxDepth * 1.5))
     if (zFalloff <= 0) {
       continue
     }
@@ -817,6 +824,7 @@ function BooleanPreviewMesh({
   operation = 'union',
   size = 0.2,
   depth = 0.06,
+  offset = 0.01,
   threshold = 24,
   previewColor = '#72ff9d',
   showShadows = false
@@ -827,6 +835,7 @@ function BooleanPreviewMesh({
     uStampSize: { value: new THREE.Vector2(0.2, 0.2) },
     uDepth: { value: 0.06 },
     uThreshold: { value: 24 / 255 },
+    uHitSide: { value: -1 },
     uSign: { value: 1 },
     uMask: { value: null },
     uBaseColor: { value: new THREE.Color('#a9b6ff') },
@@ -843,13 +852,14 @@ function BooleanPreviewMesh({
     uniforms.uStampSize.value.set(stampWidth, stampHeight)
     uniforms.uDepth.value = Math.max(1e-5, depth)
     uniforms.uThreshold.value = Math.max(0, Math.min(1, threshold / 255))
+    uniforms.uHitSide.value = offset < 0 ? 1 : -1
     uniforms.uSign.value = sign
     uniforms.uMask.value = maskTexture
     uniforms.uPreviewColor.value.set(previewColor)
 
     const stampZ = new THREE.Vector3().setFromMatrixColumn(stampMatrix, 2).normalize()
     uniforms.uStampZ.value.copy(stampZ)
-  }, [depth, maskHeight, maskTexture, maskWidth, operation, previewColor, size, stampMatrix, threshold, uniforms])
+  }, [depth, maskHeight, maskTexture, maskWidth, offset, operation, previewColor, size, stampMatrix, threshold, uniforms])
 
   useEffect(() => () => {
     uniforms.uPreviewColor.value?.dispose?.()
@@ -873,6 +883,7 @@ function BooleanPreviewMesh({
             uniform vec2 uStampSize;
             uniform float uDepth;
             uniform float uThreshold;
+            uniform float uHitSide;
             uniform float uSign;
             uniform sampler2D uMask;
 
@@ -887,17 +898,19 @@ function BooleanPreviewMesh({
               float v = (halfH - localPoint.y) / uStampSize.y;
 
               if (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0) {
-                float alpha = texture2D(uMask, vec2(u, 1.0 - v)).r;
+                float alpha = texture2D(uMask, vec2(u, v)).r;
                 if (alpha >= uThreshold) {
-                  float zDistance = abs(localPoint.z);
-                  float zFalloff = max(0.0, 1.0 - zDistance / (uDepth * 1.5));
-                  float edgeU = min(u, 1.0 - u);
-                  float edgeV = min(v, 1.0 - v);
-                  float edgeSoftness = clamp(uThreshold, 0.02, 0.22);
-                  float edgeWeight = min(1.0, min(edgeU, edgeV) / edgeSoftness);
+                  float sideDistance = localPoint.z * uHitSide;
+                  if (sideDistance >= 0.0) {
+                    float zFalloff = max(0.0, 1.0 - sideDistance / (uDepth * 1.5));
+                    float edgeU = min(u, 1.0 - u);
+                    float edgeV = min(v, 1.0 - v);
+                    float edgeSoftness = clamp(uThreshold, 0.02, 0.22);
+                    float edgeWeight = min(1.0, min(edgeU, edgeV) / edgeSoftness);
 
-                  strength = uDepth * alpha * zFalloff * edgeWeight;
-                  displaced += uStampZ * (uSign * strength);
+                    strength = uDepth * alpha * zFalloff * edgeWeight;
+                    displaced += uStampZ * (uSign * strength);
+                  }
                 }
               }
 
@@ -3874,7 +3887,8 @@ export default function MeshEditorPage() {
         {
           operation: booleanOperation,
           size: booleanStampSize,
-          depth: booleanStampDepth
+          depth: booleanStampDepth,
+          offset: booleanStampOffset
         }
       )
 
@@ -3892,7 +3906,7 @@ export default function MeshEditorPage() {
       setError(err instanceof Error ? err.message : 'Boolean operation failed.')
       setFeedback('')
     }
-  }, [applyGeometryUpdate, booleanOperation, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampSize, geometry])
+  }, [applyGeometryUpdate, booleanOperation, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampOffset, booleanStampSize, geometry])
 
   const handleClearBooleanStamp = useCallback(() => {
     setBooleanStampBasis(null)
@@ -5298,6 +5312,7 @@ export default function MeshEditorPage() {
                         operation={booleanOperation}
                         size={booleanStampSize}
                         depth={booleanStampDepth}
+                        offset={booleanStampOffset}
                         threshold={24}
                         previewColor={booleanPreviewColor}
                         showShadows={showShadows}
