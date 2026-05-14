@@ -434,6 +434,134 @@ function deformGeometryWithBooleanStamp(baseGeometry, mask, stampMatrix, {
   return result
 }
 
+function collectBooleanDeformationFaceIndices(baseGeometry, mask, stampMatrix, {
+  size = 0.2,
+  depth = 0.06,
+  offset = 0.01,
+  threshold = 24
+} = {}) {
+  if (!baseGeometry?.attributes?.position || !mask || !stampMatrix) {
+    return []
+  }
+
+  const positionAttr = baseGeometry.attributes.position
+  const indexAttr = baseGeometry.index
+  const vertexCount = positionAttr.count
+  if (!vertexCount) {
+    return []
+  }
+
+  const stampWidth = Math.max(1e-5, size * (mask.width / Math.max(mask.width, mask.height)))
+  const stampHeight = Math.max(1e-5, size * (mask.height / Math.max(mask.width, mask.height)))
+  const halfW = stampWidth * 0.5
+  const halfH = stampHeight * 0.5
+  const maxDepth = Math.max(1e-5, depth)
+  const hitSide = offset < 0 ? 1 : -1
+  const invStamp = stampMatrix.clone().invert()
+  const localPoint = new THREE.Vector3()
+
+  const sampleVertex = (vertexIndex) => {
+    localPoint
+      .fromBufferAttribute(positionAttr, vertexIndex)
+      .applyMatrix4(invStamp)
+
+    const u = (localPoint.x + halfW) / stampWidth
+    const v = (halfH - localPoint.y) / stampHeight
+    if (u < 0 || u > 1 || v < 0 || v > 1) {
+      return false
+    }
+
+    const alpha = sampleBooleanMaskAlpha(mask, u, v)
+    if (alpha < threshold) {
+      return false
+    }
+
+    const sideDistance = localPoint.z * hitSide
+    return sideDistance >= 0 && sideDistance <= maxDepth * 1.75
+  }
+
+  const faceCount = indexAttr
+    ? Math.floor(indexAttr.count / 3)
+    : Math.floor(vertexCount / 3)
+  const touchedFaceIndices = []
+
+  for (let faceIndex = 0; faceIndex < faceCount; faceIndex += 1) {
+    const ia = indexAttr ? indexAttr.array[faceIndex * 3] : faceIndex * 3
+    const ib = indexAttr ? indexAttr.array[faceIndex * 3 + 1] : faceIndex * 3 + 1
+    const ic = indexAttr ? indexAttr.array[faceIndex * 3 + 2] : faceIndex * 3 + 2
+
+    if (sampleVertex(ia) || sampleVertex(ib) || sampleVertex(ic)) {
+      touchedFaceIndices.push(faceIndex)
+      continue
+    }
+
+    // Also sample the face centroid so large triangles inside the brush area
+    // are still selected for local subdivision.
+    const ax = positionAttr.getX(ia)
+    const ay = positionAttr.getY(ia)
+    const az = positionAttr.getZ(ia)
+    const bx = positionAttr.getX(ib)
+    const by = positionAttr.getY(ib)
+    const bz = positionAttr.getZ(ib)
+    const cx = positionAttr.getX(ic)
+    const cy = positionAttr.getY(ic)
+    const cz = positionAttr.getZ(ic)
+
+    localPoint
+      .set((ax + bx + cx) / 3, (ay + by + cy) / 3, (az + bz + cz) / 3)
+      .applyMatrix4(invStamp)
+
+    const u = (localPoint.x + halfW) / stampWidth
+    const v = (halfH - localPoint.y) / stampHeight
+    if (u < 0 || u > 1 || v < 0 || v > 1) {
+      continue
+    }
+
+    const alpha = sampleBooleanMaskAlpha(mask, u, v)
+    if (alpha < threshold) {
+      continue
+    }
+
+    const sideDistance = localPoint.z * hitSide
+    if (sideDistance >= 0 && sideDistance <= maxDepth * 1.75) {
+      touchedFaceIndices.push(faceIndex)
+    }
+  }
+
+  return touchedFaceIndices
+}
+
+function tessellateBooleanDeformationRegion(baseGeometry, mask, stampMatrix, {
+  size = 0.2,
+  depth = 0.06,
+  offset = 0.01,
+  threshold = 24,
+  levels = 0
+} = {}) {
+  const passes = Math.max(0, Math.min(4, Math.floor(levels)))
+  if (passes <= 0) {
+    return baseGeometry
+  }
+
+  let nextGeometry = baseGeometry
+  for (let level = 0; level < passes; level += 1) {
+    const faceIndices = collectBooleanDeformationFaceIndices(nextGeometry, mask, stampMatrix, {
+      size,
+      depth,
+      offset,
+      threshold
+    })
+
+    if (faceIndices.length === 0) {
+      break
+    }
+
+    nextGeometry = subdivideSelectedFaces(nextGeometry, faceIndices)
+  }
+
+  return nextGeometry
+}
+
 /**
  * Convert a screen-space brush radius (pixels) into the equivalent radius in
  * texture-canvas pixels, taking into account:
@@ -1114,6 +1242,7 @@ export default function MeshEditorPage() {
   const [booleanStampBasis, setBooleanStampBasis] = useState(null)
   const [booleanStampSize, setBooleanStampSize] = useState(0.2)
   const [booleanStampDepth, setBooleanStampDepth] = useState(0.06)
+  const [booleanTessellation, setBooleanTessellation] = useState(0)
   const [booleanStampRotation, setBooleanStampRotation] = useState(0)
   const [booleanStampOffset, setBooleanStampOffset] = useState(0.01)
   const [booleanStampNudgeX, setBooleanStampNudgeX] = useState(0)
@@ -2726,10 +2855,43 @@ export default function MeshEditorPage() {
     )
   }, [booleanStampBasis, booleanStampNudgeX, booleanStampNudgeY, booleanStampOffset, booleanStampRotation])
 
+  const booleanPreviewGeometry = useMemo(() => {
+    if (!geometry || activeMenu !== 'boolean' || !booleanStampMatrix) {
+      return geometry
+    }
+
+    const mask = booleanBrushMaskRef.current
+    if (!mask) {
+      return geometry
+    }
+
+    const tessellationPasses = Math.max(0, Math.min(4, Math.floor(booleanTessellation)))
+    if (tessellationPasses <= 0) {
+      return geometry
+    }
+
+    return tessellateBooleanDeformationRegion(
+      geometry,
+      mask,
+      booleanStampMatrix,
+      {
+        size: booleanStampSize,
+        depth: booleanStampDepth,
+        offset: booleanStampOffset,
+        levels: tessellationPasses
+      }
+    )
+  }, [activeMenu, booleanBrushRevision, booleanStampDepth, booleanStampMatrix, booleanStampOffset, booleanStampSize, booleanTessellation, geometry])
+
   const booleanHasPreview = !!booleanStampLocalGeometry && !!booleanStampMatrix
 
   useEffect(() => () => booleanStampLocalGeometry?.dispose?.(), [booleanStampLocalGeometry])
   useEffect(() => () => booleanMaskTexture?.dispose?.(), [booleanMaskTexture])
+  useEffect(() => () => {
+    if (booleanPreviewGeometry && booleanPreviewGeometry !== geometry) {
+      booleanPreviewGeometry.dispose?.()
+    }
+  }, [booleanPreviewGeometry, geometry])
 
   const booleanPreviewColor = useMemo(() => {
     if (booleanOperation === 'subtract') {
@@ -3880,8 +4042,23 @@ export default function MeshEditorPage() {
 
     try {
       setError('')
+      const tessellationPasses = Math.max(0, Math.min(4, Math.floor(booleanTessellation)))
+      const tessellatedGeometry = tessellationPasses > 0
+        ? tessellateBooleanDeformationRegion(
+          geometry,
+          booleanBrushMaskRef.current,
+          booleanStampMatrix,
+          {
+            size: booleanStampSize,
+            depth: booleanStampDepth,
+            offset: booleanStampOffset,
+            levels: tessellationPasses
+          }
+        )
+        : geometry
+
       const nextGeometry = deformGeometryWithBooleanStamp(
-        geometry,
+        tessellatedGeometry,
         booleanBrushMaskRef.current,
         booleanStampMatrix,
         {
@@ -3901,12 +4078,16 @@ export default function MeshEditorPage() {
       applyGeometryUpdate(nextGeometry, [])
       setBooleanPlaceMode(false)
       setBooleanStampBasis(null)
-      setFeedback(`Brush deformation (${booleanOperation}) applied.`)
+      setFeedback(
+        tessellationPasses > 0
+          ? `Brush deformation (${booleanOperation}) applied with tessellation x${tessellationPasses}.`
+          : `Brush deformation (${booleanOperation}) applied.`
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Boolean operation failed.')
       setFeedback('')
     }
-  }, [applyGeometryUpdate, booleanOperation, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampOffset, booleanStampSize, geometry])
+  }, [applyGeometryUpdate, booleanOperation, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampOffset, booleanStampSize, booleanTessellation, geometry])
 
   const handleClearBooleanStamp = useCallback(() => {
     setBooleanStampBasis(null)
@@ -4709,6 +4890,19 @@ export default function MeshEditorPage() {
                         <strong>{booleanStampDepth.toFixed(3)}</strong>
                       </label>
                       <label className="mesh-editor-range-field">
+                        <span>Tessellation</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="4"
+                          step="1"
+                          value={booleanTessellation}
+                          onChange={event => setBooleanTessellation(Number(event.target.value))}
+                          disabled={!booleanBrushMaskRef.current}
+                        />
+                        <strong>x{booleanTessellation}</strong>
+                      </label>
+                      <label className="mesh-editor-range-field">
                         <span>Rotation</span>
                         <input
                           type="range"
@@ -5304,7 +5498,7 @@ export default function MeshEditorPage() {
                       />
                     ) : activeMenu === 'boolean' && booleanHasPreview && booleanMaskTexture ? (
                       <BooleanPreviewMesh
-                        geometry={geometry}
+                        geometry={booleanPreviewGeometry || geometry}
                         maskTexture={booleanMaskTexture}
                         maskWidth={booleanBrushMaskRef.current?.width || 1}
                         maskHeight={booleanBrushMaskRef.current?.height || 1}
