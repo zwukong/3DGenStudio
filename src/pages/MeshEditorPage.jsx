@@ -808,6 +808,133 @@ function EditorMesh({ geometry, selectedFaceIndices, selectedVertexIndices, show
   )
 }
 
+function BooleanPreviewMesh({
+  geometry,
+  maskTexture,
+  maskWidth,
+  maskHeight,
+  stampMatrix,
+  operation = 'union',
+  size = 0.2,
+  depth = 0.06,
+  threshold = 24,
+  previewColor = '#72ff9d',
+  showShadows = false
+}) {
+  const uniforms = useMemo(() => ({
+    uInvStamp: { value: new THREE.Matrix4() },
+    uStampZ: { value: new THREE.Vector3(0, 0, 1) },
+    uStampSize: { value: new THREE.Vector2(0.2, 0.2) },
+    uDepth: { value: 0.06 },
+    uThreshold: { value: 24 / 255 },
+    uSign: { value: 1 },
+    uMask: { value: null },
+    uBaseColor: { value: new THREE.Color('#a9b6ff') },
+    uPreviewColor: { value: new THREE.Color('#72ff9d') }
+  }), [])
+
+  useEffect(() => {
+    const maxDim = Math.max(maskWidth || 1, maskHeight || 1)
+    const stampWidth = Math.max(1e-5, size * ((maskWidth || 1) / maxDim))
+    const stampHeight = Math.max(1e-5, size * ((maskHeight || 1) / maxDim))
+    const sign = (String(operation || 'union').toLowerCase() === 'union') ? 1 : -1
+
+    uniforms.uInvStamp.value.copy(stampMatrix).invert()
+    uniforms.uStampSize.value.set(stampWidth, stampHeight)
+    uniforms.uDepth.value = Math.max(1e-5, depth)
+    uniforms.uThreshold.value = Math.max(0, Math.min(1, threshold / 255))
+    uniforms.uSign.value = sign
+    uniforms.uMask.value = maskTexture
+    uniforms.uPreviewColor.value.set(previewColor)
+
+    const stampZ = new THREE.Vector3().setFromMatrixColumn(stampMatrix, 2).normalize()
+    uniforms.uStampZ.value.copy(stampZ)
+  }, [depth, maskHeight, maskTexture, maskWidth, operation, previewColor, size, stampMatrix, threshold, uniforms])
+
+  useEffect(() => () => {
+    uniforms.uPreviewColor.value?.dispose?.()
+  }, [uniforms])
+
+  return (
+    <group>
+      <mesh geometry={geometry} castShadow={showShadows} receiveShadow={showShadows}>
+        <shaderMaterial
+          uniforms={uniforms}
+          side={THREE.DoubleSide}
+          transparent={false}
+          depthTest
+          depthWrite
+          vertexShader={`
+            varying vec3 vNormal;
+            varying float vStrength;
+
+            uniform mat4 uInvStamp;
+            uniform vec3 uStampZ;
+            uniform vec2 uStampSize;
+            uniform float uDepth;
+            uniform float uThreshold;
+            uniform float uSign;
+            uniform sampler2D uMask;
+
+            void main() {
+              vec3 displaced = position;
+              float strength = 0.0;
+
+              vec3 localPoint = (uInvStamp * vec4(position, 1.0)).xyz;
+              float halfW = uStampSize.x * 0.5;
+              float halfH = uStampSize.y * 0.5;
+              float u = (localPoint.x + halfW) / uStampSize.x;
+              float v = (halfH - localPoint.y) / uStampSize.y;
+
+              if (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0) {
+                float alpha = texture2D(uMask, vec2(u, 1.0 - v)).r;
+                if (alpha >= uThreshold) {
+                  float zDistance = abs(localPoint.z);
+                  float zFalloff = max(0.0, 1.0 - zDistance / (uDepth * 1.5));
+                  float edgeU = min(u, 1.0 - u);
+                  float edgeV = min(v, 1.0 - v);
+                  float edgeSoftness = clamp(uThreshold, 0.02, 0.22);
+                  float edgeWeight = min(1.0, min(edgeU, edgeV) / edgeSoftness);
+
+                  strength = uDepth * alpha * zFalloff * edgeWeight;
+                  displaced += uStampZ * (uSign * strength);
+                }
+              }
+
+              vStrength = strength;
+              vNormal = normalize(normalMatrix * normal);
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
+            }
+          `}
+          fragmentShader={`
+            varying vec3 vNormal;
+            varying float vStrength;
+
+            uniform vec3 uBaseColor;
+            uniform vec3 uPreviewColor;
+            uniform float uDepth;
+
+            void main() {
+              vec3 n = normalize(vNormal);
+              vec3 l1 = normalize(vec3(0.4, 0.8, 0.5));
+              vec3 l2 = normalize(vec3(-0.55, 0.35, -0.45));
+              float lambert = 0.28 + 0.52 * max(dot(n, l1), 0.0) + 0.20 * max(dot(n, l2), 0.0);
+              float normalizedStrength = clamp(vStrength / max(uDepth, 1e-5), 0.0, 1.0);
+              float t = smoothstep(0.08, 0.55, normalizedStrength);
+              vec3 base = mix(uBaseColor, uPreviewColor, t);
+              vec3 lit = base * lambert + (uPreviewColor * (0.18 * t));
+              gl_FragColor = vec4(lit, 1.0);
+            }
+          `}
+        />
+      </mesh>
+      <mesh geometry={geometry}>
+        <meshBasicMaterial color="#ffffff" wireframe transparent opacity={0.08} depthWrite={false} />
+      </mesh>
+    </group>
+  )
+}
+
 function TexturedMesh({ root, textureKey, displayTexture, showShadows = false }) {
   const baseObject = useMemo(() => {
     if (!root || !displayTexture) {
@@ -2553,6 +2680,25 @@ export default function MeshEditorPage() {
     return buildBooleanStampGeometry(mask, booleanStampSize, booleanStampDepth)
   }, [booleanBrushRevision, booleanStampDepth, booleanStampSize])
 
+  const booleanMaskTexture = useMemo(() => {
+    void booleanBrushRevision
+    const mask = booleanBrushMaskRef.current
+    if (!mask?.alpha || !mask.width || !mask.height) {
+      return null
+    }
+
+    const maskFormat = THREE.RedFormat ?? THREE.LuminanceFormat
+    const texture = new THREE.DataTexture(mask.alpha, mask.width, mask.height, maskFormat)
+    texture.magFilter = THREE.LinearFilter
+    texture.minFilter = THREE.LinearFilter
+    texture.wrapS = THREE.ClampToEdgeWrapping
+    texture.wrapT = THREE.ClampToEdgeWrapping
+    texture.flipY = false
+    texture.generateMipmaps = false
+    texture.needsUpdate = true
+    return texture
+  }, [booleanBrushRevision])
+
   const booleanStampMatrix = useMemo(() => {
     if (!booleanStampBasis) {
       return null
@@ -2569,31 +2715,8 @@ export default function MeshEditorPage() {
 
   const booleanHasPreview = !!booleanStampLocalGeometry && !!booleanStampMatrix
 
-  const booleanResultPreviewGeometry = useMemo(() => {
-    if (!geometry || !booleanStampLocalGeometry || !booleanStampMatrix) {
-          // While the user is positioning the stamp, skip the expensive CPU deformation
-          // and rely on the cheap ghost overlay mesh. The full deform only runs once the
-          // stamp is locked (booleanPlaceMode === false).
-          if (booleanPlaceMode) {
-            return null
-          }
-      return null
-    }
-
-    try {
-      const mask = booleanBrushMaskRef.current
-      return deformGeometryWithBooleanStamp(geometry, mask, booleanStampMatrix, {
-        operation: booleanOperation,
-        size: booleanStampSize,
-        depth: booleanStampDepth
-      })
-    } catch {
-      return null
-    }
-  }, [booleanOperation, booleanPlaceMode, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampSize, geometry])
-
   useEffect(() => () => booleanStampLocalGeometry?.dispose?.(), [booleanStampLocalGeometry])
-  useEffect(() => () => booleanResultPreviewGeometry?.dispose?.(), [booleanResultPreviewGeometry])
+  useEffect(() => () => booleanMaskTexture?.dispose?.(), [booleanMaskTexture])
 
   const booleanPreviewColor = useMemo(() => {
     if (booleanOperation === 'subtract') {
@@ -3744,7 +3867,7 @@ export default function MeshEditorPage() {
 
     try {
       setError('')
-      const nextGeometry = booleanResultPreviewGeometry?.clone?.() || deformGeometryWithBooleanStamp(
+      const nextGeometry = deformGeometryWithBooleanStamp(
         geometry,
         booleanBrushMaskRef.current,
         booleanStampMatrix,
@@ -3769,7 +3892,7 @@ export default function MeshEditorPage() {
       setError(err instanceof Error ? err.message : 'Boolean operation failed.')
       setFeedback('')
     }
-  }, [applyGeometryUpdate, booleanOperation, booleanResultPreviewGeometry, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampSize, geometry])
+  }, [applyGeometryUpdate, booleanOperation, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampSize, geometry])
 
   const handleClearBooleanStamp = useCallback(() => {
     setBooleanStampBasis(null)
@@ -5142,7 +5265,7 @@ export default function MeshEditorPage() {
                 </div>
               ) : geometry ? (
                 <>
-                  <Canvas shadows={showShadows ? { type: THREE.PCFSoftShadowMap } : false} resize={{ offsetSize: true }} style={{ width: '100%', height: '100%' }}>
+                  <Canvas shadows={showShadows ? { type: THREE.PCFSoftShadowMap } : false} resize={{ offsetSize: true }} style={{ width: '100%', height: '100%' }} gl={{ powerPreference: 'high-performance' }}>
                     <PerspectiveCamera makeDefault position={[3, 3, 5]} near={0.0001} far={4000} />
                     <ambientLight intensity={1.25} />
                     <directionalLight
@@ -5165,26 +5288,40 @@ export default function MeshEditorPage() {
                         displayTexture={displayTextureRef.current}
                         showShadows={showShadows}
                       />
+                    ) : activeMenu === 'boolean' && booleanHasPreview && booleanMaskTexture ? (
+                      <BooleanPreviewMesh
+                        geometry={geometry}
+                        maskTexture={booleanMaskTexture}
+                        maskWidth={booleanBrushMaskRef.current?.width || 1}
+                        maskHeight={booleanBrushMaskRef.current?.height || 1}
+                        stampMatrix={booleanStampMatrix}
+                        operation={booleanOperation}
+                        size={booleanStampSize}
+                        depth={booleanStampDepth}
+                        threshold={24}
+                        previewColor={booleanPreviewColor}
+                        showShadows={showShadows}
+                      />
                     ) : (
                       <EditorMesh
-                        geometry={activeMenu === 'boolean' && booleanResultPreviewGeometry ? booleanResultPreviewGeometry : geometry}
+                        geometry={geometry}
                         selectedFaceIndices={activeMenu === 'modeling' ? selectedFaceIndices : []}
                         selectedVertexIndices={activeMenu === 'modeling' ? selectedVertexIndices : []}
                         showShadows={showShadows}
                       />
                     )}
-                    {activeMenu === 'boolean' && booleanHasPreview && !booleanResultPreviewGeometry && (
+                    {activeMenu === 'boolean' && booleanHasPreview && (!booleanMaskTexture || booleanPlaceMode) && (
                       <group renderOrder={30}>
                         <mesh geometry={booleanStampLocalGeometry} matrix={booleanStampMatrix} matrixAutoUpdate={false}>
                           <meshStandardMaterial
                             color={booleanPreviewColor}
                             emissive={booleanPreviewColor}
-                            emissiveIntensity={0.2}
+                            emissiveIntensity={0.12}
                             transparent
-                            opacity={0.36}
+                            opacity={0.14}
                             metalness={0.05}
                             roughness={0.45}
-                            depthTest={false}
+                            depthTest
                             depthWrite={false}
                             side={THREE.DoubleSide}
                           />
@@ -5194,8 +5331,8 @@ export default function MeshEditorPage() {
                             color="#ffffff"
                             wireframe
                             transparent
-                            opacity={0.95}
-                            depthTest={false}
+                            opacity={0.18}
+                            depthTest
                             depthWrite={false}
                           />
                         </mesh>
