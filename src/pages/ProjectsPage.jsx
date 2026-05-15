@@ -19,6 +19,13 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v0.8.1',
+    date: '2026-05-15',
+    items: [
+      'Mesh Editor: Fixed modifications applied between modes',
+    ],
+  },
+  {
     version: 'v0.8.0',
     date: '2026-05-14',
     items: [
