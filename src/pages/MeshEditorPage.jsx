@@ -832,7 +832,7 @@ function generateBlurBorderGradient(sourceMaskCanvas, targetWidth, targetHeight,
   return gradientMask
 }
 
-function CameraRig({ geometry, frameKey, onCameraReady, controlsEnabled = true }) {
+function CameraRig({ geometry, frameKey, onCameraReady, controlsEnabled = true, allowPan = true, lockToCenter = false }) {
   const { camera } = useThree()
   const controlsRef = useRef(null)
   const lastFramedKeyRef = useRef(null)
@@ -878,18 +878,31 @@ function CameraRig({ geometry, frameKey, onCameraReady, controlsEnabled = true }
     }
   }, [camera, geometry, frameKey])
 
+  useEffect(() => {
+    if (!lockToCenter || !geometry || !controlsRef.current) {
+      return
+    }
+
+    geometry.computeBoundingSphere()
+    const center = geometry.boundingSphere?.center || new THREE.Vector3()
+    controlsRef.current.target.copy(center)
+    camera.lookAt(center)
+    controlsRef.current.update()
+  }, [camera, geometry, lockToCenter])
+
   return (
     <OrbitControls
       ref={controlsRef}
       makeDefault
       enabled={controlsEnabled}
       enableDamping
+      enablePan={allowPan}
       minDistance={0.001}
       maxDistance={100}
       mouseButtons={{
         LEFT: null,
         MIDDLE: THREE.MOUSE.ROTATE,
-        RIGHT: THREE.MOUSE.PAN
+        RIGHT: allowPan ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE
       }}
     />
   )
@@ -1194,6 +1207,103 @@ function processPatchImage(imageData, sharpness = 0, saturation = 1, patchMask =
   return imageData;
 }
 
+function createFullAlphaMaskCanvas(width, height) {
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d')
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, width, height)
+  return canvas
+}
+
+function createProjectionCropMaskCanvasFromPatch(patchCanvas, cropBorder = 0) {
+  const width = patchCanvas?.width || 0
+  const height = patchCanvas?.height || 0
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+
+  if (!width || !height || !patchCanvas) {
+    return canvas
+  }
+
+  const context = canvas.getContext('2d')
+  const patchContext = patchCanvas.getContext('2d', { willReadFrequently: true }) || patchCanvas.getContext('2d')
+  const patchData = patchContext.getImageData(0, 0, width, height).data
+  const out = context.createImageData(width, height)
+  const outData = out.data
+  const pixelCount = width * height
+  const mask = new Uint8Array(pixelCount)
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    // Keep only the projected silhouette from patch alpha.
+    mask[i] = patchData[i * 4 + 3] > 8 ? 1 : 0
+  }
+
+  let borderPx = Math.max(0, Math.floor(cropBorder || 0))
+  if (borderPx > 0) {
+    // Erode along the alpha silhouette border (not square bounds) using a
+    // chamfer distance transform from transparent -> opaque pixels.
+    const ORTHO = 10
+    const DIAG = 14
+    const INF = 1 << 28
+    const distance = new Int32Array(pixelCount)
+
+    for (let i = 0; i < pixelCount; i += 1) {
+      distance[i] = mask[i] ? INF : 0
+    }
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const i = y * width + x
+        let best = distance[i]
+        if (x > 0) best = Math.min(best, distance[i - 1] + ORTHO)
+        if (y > 0) best = Math.min(best, distance[i - width] + ORTHO)
+        if (x > 0 && y > 0) best = Math.min(best, distance[i - width - 1] + DIAG)
+        if (x + 1 < width && y > 0) best = Math.min(best, distance[i - width + 1] + DIAG)
+        distance[i] = best
+      }
+    }
+
+    for (let y = height - 1; y >= 0; y -= 1) {
+      for (let x = width - 1; x >= 0; x -= 1) {
+        const i = y * width + x
+        let best = distance[i]
+        if (x + 1 < width) best = Math.min(best, distance[i + 1] + ORTHO)
+        if (y + 1 < height) best = Math.min(best, distance[i + width] + ORTHO)
+        if (x > 0 && y + 1 < height) best = Math.min(best, distance[i + width - 1] + DIAG)
+        if (x + 1 < width && y + 1 < height) best = Math.min(best, distance[i + width + 1] + DIAG)
+        distance[i] = best
+      }
+    }
+
+    const borderCost = borderPx * ORTHO
+    for (let i = 0; i < pixelCount; i += 1) {
+      if (!mask[i]) {
+        continue
+      }
+      if (distance[i] <= borderCost) {
+        mask[i] = 0
+      }
+    }
+  }
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    if (!mask[i]) {
+      continue
+    }
+    const idx = i * 4
+    outData[idx] = 255
+    outData[idx + 1] = 255
+    outData[idx + 2] = 255
+    outData[idx + 3] = 255
+  }
+
+  context.putImageData(out, 0, 0)
+  return canvas
+}
+
 export default function MeshEditorPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -1219,6 +1329,18 @@ export default function MeshEditorPage() {
   const [comfyWorkflows, setComfyWorkflows] = useState([])
   const [textureWorkflowId, setTextureWorkflowId] = useState('')
   const [textureWorkflowInputs, setTextureWorkflowInputs] = useState({})
+  const [projectionWorkflowId, setProjectionWorkflowId] = useState('')
+  const [projectionWorkflowInputs, setProjectionWorkflowInputs] = useState({})
+  const [projectionImageParamSources, setProjectionImageParamSources] = useState({})
+  const [projectionStarted, setProjectionStarted] = useState(false)
+  const [projecting, setProjecting] = useState(false)
+  const [projectionRebuilding, setProjectionRebuilding] = useState(false)
+  const [projectionRebuildProgress, setProjectionRebuildProgress] = useState(0)
+  const [projectionLayerDrafts, setProjectionLayerDrafts] = useState({})
+  const [projectionTextureSize, setProjectionTextureSize] = useState(2048)
+  const [projectionViewResolution, setProjectionViewResolution] = useState(1024)
+  const [projectionBlendPixels, setProjectionBlendPixels] = useState(12)
+  const [projectionLayers, setProjectionLayers] = useState([])
   const [brushSize, setBrushSize] = useState(20)
   const [cropPadding, setCropPadding] = useState(36)
   const [featherRadius, setFeatherRadius] = useState(12)
@@ -1286,9 +1408,14 @@ export default function MeshEditorPage() {
   const originalTextureBackupRef = useRef(null)
   const patchedTextureRef = useRef(null)
   const projectionViewDataRef = useRef([])
+  const projectionCoverageRef = useRef(null)
+  const projectionLayerDataRef = useRef(new Map())
+  const projectionLayerCounterRef = useRef(0)
+  const projectionRebuildTokenRef = useRef(0)
   const [imageParamSources, setImageParamSources] = useState({});
   const [showAssetSelector, setShowAssetSelector] = useState(false);
   const [pendingAssetParamId, setPendingAssetParamId] = useState(null);
+  const [pendingAssetSelectorMode, setPendingAssetSelectorMode] = useState('texturing')
 
   // --- Painting mode state ---
   const [paintBrushSource, setPaintBrushSource] = useState('asset'); // 'asset' | 'computer'
@@ -2664,6 +2791,18 @@ export default function MeshEditorPage() {
     })
   }, [comfyWorkflows])
 
+  const projectionWorkflows = useMemo(() => {
+    return comfyWorkflows.filter(workflow => {
+      const valueTypes = (workflow.parameters || []).map(parameter => getWorkflowValueType(parameter))
+      const imageInputCount = valueTypes.filter(valueType => valueType === 'image').length
+      const outputValueTypes = (workflow.outputs || []).map(output => output.valueType || 'image')
+
+      return imageInputCount >= 1
+        && outputValueTypes.includes('image')
+        && valueTypes.every(valueType => ['image', 'string', 'number', 'boolean'].includes(valueType))
+    })
+  }, [comfyWorkflows])
+
   useEffect(() => {
     if (texturingWorkflows.length === 0) {
       setTextureWorkflowId('')
@@ -2677,13 +2816,34 @@ export default function MeshEditorPage() {
     ))
   }, [texturingWorkflows])
 
+  useEffect(() => {
+    if (projectionWorkflows.length === 0) {
+      setProjectionWorkflowId('')
+      return
+    }
+
+    setProjectionWorkflowId(current => (
+      projectionWorkflows.some(workflow => String(workflow.id) === String(current))
+        ? current
+        : String(projectionWorkflows[0].id)
+    ))
+  }, [projectionWorkflows])
+
   const selectedTextureWorkflow = useMemo(() => {
     return texturingWorkflows.find(workflow => String(workflow.id) === String(textureWorkflowId)) || null
   }, [textureWorkflowId, texturingWorkflows])
 
+  const selectedProjectionWorkflow = useMemo(() => {
+    return projectionWorkflows.find(workflow => String(workflow.id) === String(projectionWorkflowId)) || null
+  }, [projectionWorkflowId, projectionWorkflows])
+
   useEffect(() => {
     setTextureWorkflowInputs(createTexturePaintWorkflowDraft(selectedTextureWorkflow))
   }, [selectedTextureWorkflow])
+
+  useEffect(() => {
+    setProjectionWorkflowInputs(createTexturePaintWorkflowDraft(selectedProjectionWorkflow))
+  }, [selectedProjectionWorkflow])
 
   const editableGeometryHasUvs = !!geometry?.attributes?.uv?.count
   const texturingUnavailableReason = useMemo(() => {
@@ -2767,7 +2927,55 @@ export default function MeshEditorPage() {
     setImageParamSources(defaultSources);
   }, [selectedTextureWorkflow]);
 
+  const handleProjectionImageParamSourceChange = useCallback((paramId, type, value = null) => {
+    setProjectionImageParamSources(prev => {
+      const next = { ...prev }
+
+      if (type === 'position-view') {
+        for (const [id, config] of Object.entries(next)) {
+          if (config.type === 'position-view' && id !== paramId) {
+            next[id] = { type: 'none' }
+          }
+        }
+      }
+
+      if (type === 'asset') {
+        next[paramId] = {
+          type: 'asset',
+          assetId: value?.id,
+          assetName: value?.name,
+          filePath: value?.filePath,
+          asset: value || null
+        }
+      } else if (type === 'file') {
+        next[paramId] = { type: 'file', file: value, fileName: value?.name }
+      } else {
+        next[paramId] = { type }
+      }
+
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!selectedProjectionWorkflow) {
+      setProjectionImageParamSources({})
+      return
+    }
+
+    const imageParams = (selectedProjectionWorkflow.parameters || [])
+      .filter(param => getWorkflowValueType(param) === 'image')
+    const defaults = {}
+
+    imageParams.forEach((param, index) => {
+      defaults[param.id] = { type: index === 0 ? 'position-view' : 'none' }
+    })
+
+    setProjectionImageParamSources(defaults)
+  }, [selectedProjectionWorkflow])
+
   const texturingReady = !loading && !texturingUnavailableReason && !!selectedTextureWorkflow && !!displayTextureRef.current && !!maskTextureRef.current
+  const projectionReady = !loading && !texturingUnavailableReason && !!selectedProjectionWorkflow && !!displayTextureRef.current
 
   // Texturing & Painting both require a textured material with valid UVs.
   // While the mesh is still loading we keep the modes enabled (otherwise the
@@ -2778,15 +2986,19 @@ export default function MeshEditorPage() {
     : !!texturableMesh?.textureCanvas && !texturableMesh?.supportError
   const textureModesDisabledReason = textureModesSupported
     ? ''
-    : (texturableMesh?.supportError || 'This mesh has no material or UVs, so texturing and painting are unavailable.')
+    : (texturableMesh?.supportError || 'This mesh has no material or UVs, so texturing, painting, and projection are unavailable.')
 
   // If the active tab becomes unsupported after the mesh finishes loading
   // (e.g. a UV-less mesh), fall back to Modeling so the panel stays usable.
   useEffect(() => {
-    if (!textureModesSupported && (activeMenu === 'texturing' || activeMenu === 'painting')) {
+    if (!textureModesSupported && (activeMenu === 'texturing' || activeMenu === 'painting' || activeMenu === 'projection')) {
       setActiveMenu('modeling')
     }
   }, [activeMenu, textureModesSupported])
+
+  const projectionWorkflowParameters = useMemo(() => {
+    return (selectedProjectionWorkflow?.parameters || []).filter(parameter => getWorkflowValueType(parameter) !== 'image')
+  }, [selectedProjectionWorkflow])
 
 	const rebuildProjectedTexturePreview = useCallback(() => {
 		if (
@@ -4298,6 +4510,365 @@ export default function MeshEditorPage() {
     navigate(-1)
   }, [navigate, returnTo])
 
+  useEffect(() => {
+    setProjectionStarted(false)
+    projectionCoverageRef.current = null
+    projectionLayerDataRef.current.clear()
+    projectionLayerCounterRef.current = 0
+    setProjectionLayers([])
+  }, [texturableMesh])
+
+  const rebuildProjectionTexture = useCallback(async (layers, { announce = false } = {}) => {
+    if (!texturableMesh?.textureCanvas || !displayTextureRef.current) {
+      return
+    }
+
+    const textureCanvas = texturableMesh.textureCanvas
+    const texW = textureCanvas.width
+    const texH = textureCanvas.height
+    const coverageMap = new Uint8Array(texW * texH)
+    const rebuildToken = ++projectionRebuildTokenRef.current
+
+    setProjectionRebuilding(true)
+    setProjectionRebuildProgress(0)
+
+    try {
+      const textureContext = textureCanvas.getContext('2d')
+      textureContext.clearRect(0, 0, texW, texH)
+
+      const visibleLayers = layers.filter(layer => layer.visible !== false)
+      for (let layerIndex = 0; layerIndex < visibleLayers.length; layerIndex += 1) {
+        if (projectionRebuildTokenRef.current !== rebuildToken) {
+          return
+        }
+
+        const layer = visibleLayers[layerIndex]
+        const layerData = projectionLayerDataRef.current.get(layer.id)
+        if (!layerData?.camera || !layerData?.patchCanvas) {
+          continue
+        }
+
+        const patchCanvas = layerData.patchCanvas
+        const projectionCamera = layerData.camera.clone()
+        projectionCamera.updateProjectionMatrix?.()
+        projectionCamera.updateMatrixWorld?.(true)
+
+        const maskCanvas = createProjectionCropMaskCanvasFromPatch(patchCanvas, layer.cropBorder || 0)
+        const accumulatedColor = new Float32Array(texW * texH * 4)
+        const accumulatedWeight = new Float32Array(texW * texH)
+
+        await accumulateProjectedPatch({
+          root: texturableMesh.root,
+          textureKey: texturableMesh.textureKey,
+          textureConfig: texturableMesh.textureConfig,
+          camera: projectionCamera,
+          maskCanvas,
+          bbox: { x: 0, y: 0, width: patchCanvas.width, height: patchCanvas.height },
+          patchImage: patchCanvas,
+          featherRadius: 0,
+          accumulatedColor,
+          accumulatedWeight,
+          textureWidth: texW,
+          textureHeight: texH,
+          coverageMap,
+          blendPixels: layer.blendPixels,
+          markCoverage: true,
+          binaryMask: false,
+          onProgress: progress => {
+            const overall = (layerIndex + progress) / Math.max(1, visibleLayers.length)
+            setProjectionRebuildProgress(overall)
+            if (announce) {
+              setFeedback(`Rebuilding projections... ${layerIndex + 1}/${visibleLayers.length} ${Math.round(progress * 100)}%`)
+            }
+          }
+        })
+
+        if (projectionRebuildTokenRef.current !== rebuildToken) {
+          return
+        }
+
+        finalizeProjectedPatch({
+          textureCanvas,
+          accumulatedColor,
+          accumulatedWeight,
+          gapFillRadius: Math.max(2, Math.round((layer.blendPixels || 0) / 2))
+        })
+      }
+
+      if (projectionRebuildTokenRef.current !== rebuildToken) {
+        return
+      }
+
+      projectionCoverageRef.current = coverageMap
+      updateCanvasTexture(displayTextureRef.current)
+      setTextureRevision(current => current + 1)
+      if (announce) {
+        setFeedback(visibleLayers.length > 0
+          ? `Projection stack rebuilt (${visibleLayers.length} projection${visibleLayers.length === 1 ? '' : 's'}).`
+          : 'Projection stack cleared.')
+      }
+    } finally {
+      if (projectionRebuildTokenRef.current === rebuildToken) {
+        setProjectionRebuilding(false)
+        setProjectionRebuildProgress(0)
+      }
+    }
+  }, [texturableMesh])
+
+  useEffect(() => {
+    if (!projectionStarted || !texturableMesh?.textureCanvas) {
+      return
+    }
+
+    void rebuildProjectionTexture(projectionLayers, { announce: false })
+  }, [projectionLayers, projectionStarted, rebuildProjectionTexture, texturableMesh])
+
+  const handleUpdateProjectionLayer = useCallback((id, updates) => {
+    setProjectionLayers(current => current.map(layer => layer.id === id ? { ...layer, ...updates } : layer))
+  }, [])
+
+  const handleDeleteProjectionLayer = useCallback((id) => {
+    projectionLayerDataRef.current.delete(id)
+    setProjectionLayers(current => current.filter(layer => layer.id !== id))
+  }, [])
+
+  const handleMoveProjectionLayer = useCallback((id, direction) => {
+    setProjectionLayers(current => {
+      const index = current.findIndex(layer => layer.id === id)
+      if (index === -1) {
+        return current
+      }
+
+      const target = direction === 'up' ? index + 1 : index - 1
+      if (target < 0 || target >= current.length) {
+        return current
+      }
+
+      const next = current.slice()
+      const [moved] = next.splice(index, 1)
+      next.splice(target, 0, moved)
+      return next
+    })
+  }, [])
+
+  const handleStartProjectionSession = useCallback(() => {
+    if (!texturableMesh?.textureCanvas) {
+      setFeedback('Projection mode requires a texturable mesh.')
+      return
+    }
+
+    const clampedSize = Math.max(512, Math.min(4096, Math.round(projectionTextureSize)))
+    const textureCanvas = texturableMesh.textureCanvas
+    textureCanvas.width = clampedSize
+    textureCanvas.height = clampedSize
+    const textureCtx = textureCanvas.getContext('2d')
+    textureCtx.clearRect(0, 0, clampedSize, clampedSize)
+
+    if (texturableMesh.maskCanvas) {
+      texturableMesh.maskCanvas.width = clampedSize
+      texturableMesh.maskCanvas.height = clampedSize
+      clearCanvas(texturableMesh.maskCanvas)
+    }
+
+    projectionCoverageRef.current = new Uint8Array(clampedSize * clampedSize)
+    projectionLayerDataRef.current.clear()
+    projectionLayerCounterRef.current = 0
+    setProjectionLayers([])
+    setProjectionStarted(true)
+    setPendingPatch(null)
+    setPatchNoise(0)
+    setProjectionOpacities([1])
+    originalTextureBackupRef.current = null
+    patchedTextureRef.current = null
+    projectionViewDataRef.current = []
+    projectionMaskBackupRef.current = null
+
+    displayTextureRef.current?.dispose?.()
+    maskTextureRef.current?.dispose?.()
+    displayTextureRef.current = createCanvasTexture(textureCanvas, texturableMesh.textureConfig)
+    maskTextureRef.current = texturableMesh.maskCanvas
+      ? createCanvasTexture(texturableMesh.maskCanvas, texturableMesh.textureConfig)
+      : null
+
+    setTextureRevision(current => current + 1)
+    setFeedback(`Projection session started with ${clampedSize}x${clampedSize} texture.`)
+  }, [projectionTextureSize, texturableMesh])
+
+  const handleRunProjectionWorkflow = useCallback(async () => {
+    if (projecting || !projectionStarted || !projectionReady || !selectedProjectionWorkflow || !texturableMesh?.textureCanvas) {
+      return
+    }
+
+    const viewParamEntries = Object.entries(projectionImageParamSources)
+    const positionViewParam = viewParamEntries.find(([, config]) => config?.type === 'position-view')
+    if (!positionViewParam?.[0]) {
+      setFeedback('Select one image input as Position View.')
+      return
+    }
+
+    if (!cameraRef.current) {
+      setFeedback('Camera is not ready yet. Try again.')
+      return
+    }
+
+    const [positionViewParamId] = positionViewParam
+    const staticImageParams = viewParamEntries.filter(([, config]) => config?.type === 'asset' || config?.type === 'file')
+    const texW = texturableMesh.textureCanvas.width
+    const texH = texturableMesh.textureCanvas.height
+    const sendResolution = Math.max(512, Math.min(2048, Math.round(projectionViewResolution)))
+
+    try {
+      setProjecting(true)
+      setError('')
+      setFeedback('Capturing position view...')
+
+      const projectionCamera = cameraRef.current.clone()
+      projectionCamera.aspect = 1
+      projectionCamera.updateProjectionMatrix?.()
+      projectionCamera.updateMatrixWorld?.(true)
+
+      const viewCanvas = captureTexturedMeshView({
+        root: texturableMesh.root,
+        textureKey: texturableMesh.textureKey,
+        displayTexture: displayTextureRef.current,
+        camera: projectionCamera,
+        width: sendResolution,
+        height: sendResolution,
+        renderMode: 'lit-geometry'
+      })
+      const positionViewFile = await canvasToFile(viewCanvas, 'projection-position-view.png')
+
+      const staticFiles = {}
+      for (const [paramId, config] of staticImageParams) {
+        let file = null
+        if (config.type === 'asset') {
+          const url = config.asset ? buildAssetUrl(config.asset) : buildAssetUrl({ filePath: config.filePath, filename: config.filePath })
+          if (!url) {
+            throw new Error(`Could not resolve selected asset for input ${paramId}.`)
+          }
+          const response = await fetch(url)
+          if (!response.ok) {
+            throw new Error(`Failed to fetch asset image (${response.status}).`)
+          }
+          const blob = await response.blob()
+          file = new File([blob], config.assetName || 'projection-input.png', { type: blob.type || 'image/png' })
+        } else if (config.type === 'file') {
+          file = config.file
+        }
+
+        if (file) {
+          staticFiles[paramId] = file
+        }
+      }
+
+      const workflowInputs = {
+        ...projectionWorkflowInputs,
+        ...staticFiles,
+        [positionViewParamId]: positionViewFile
+      }
+
+      const promptId = createExecutionId('mesh-projection-prompt')
+      const clientId = createExecutionId('mesh-projection-client')
+      const stopProgress = subscribeToComfyWorkflowProgress(promptId, {
+        onMessage: payload => {
+          const detail = payload?.detail || payload?.currentNodeLabel
+          if (detail) {
+            setFeedback(detail)
+          }
+        },
+        onError: () => {}
+      })
+
+      let generatedAssets
+      try {
+        setFeedback('Running projection workflow...')
+        generatedAssets = await runComfyWorkflow(projectId ? Number(projectId) : null, {
+          workflowId: Number(selectedProjectionWorkflow.id),
+          name: `${meshName || 'Mesh'} Projection`,
+          promptId,
+          clientId,
+          persistProcessingCard: false,
+          persistGeneratedAssets: false,
+          inputs: workflowInputs
+        })
+      } finally {
+        stopProgress()
+      }
+
+      const generatedPatchAsset = pickGeneratedTextureAsset(generatedAssets)
+      if (!generatedPatchAsset) {
+        throw new Error('The projection workflow did not return an image output.')
+      }
+
+      setFeedback('Preparing projection layer...')
+      const patchImage = await loadImageElement(buildAssetUrl(generatedPatchAsset))
+      const patchCanvas = document.createElement('canvas')
+      patchCanvas.width = sendResolution
+      patchCanvas.height = sendResolution
+      patchCanvas.getContext('2d').drawImage(patchImage, 0, 0, sendResolution, sendResolution)
+
+      projectionLayerCounterRef.current += 1
+      const layerId = `projection-${Date.now()}-${projectionLayerCounterRef.current}`
+      const layerName = `Projection ${projectionLayerCounterRef.current}`
+      projectionLayerDataRef.current.set(layerId, {
+        camera: projectionCamera.clone(),
+        patchCanvas,
+        generatedAsset: generatedPatchAsset,
+        sendResolution,
+        cropBorder: 0
+      })
+
+      setProjectionLayers(current => ([
+        ...current,
+        {
+          id: layerId,
+          name: layerName,
+          blendPixels: projectionBlendPixels,
+          cropBorder: 0,
+          visible: true,
+          sendResolution
+        }
+      ]))
+
+      if (projectId && nodeId) {
+        await updateProjectNode(Number(projectId), Number(nodeId), {
+          metadata: { lastAction: 'mesh-editor-projection' }
+        })
+      }
+
+      setFeedback(`${layerName} added to the projection stack.`)
+    } catch (projectionError) {
+      const failureMessage = projectionError?.message || 'Failed to project workflow result to texture.'
+      setError(failureMessage)
+      setFeedback('')
+      addNotification({
+        title: 'Projection failed',
+        message: failureMessage,
+        source: 'ComfyUI',
+        tone: 'error'
+      })
+    } finally {
+      setProjecting(false)
+    }
+  }, [
+    addNotification,
+    meshName,
+    nodeId,
+    projectId,
+    projectionBlendPixels,
+    projectionImageParamSources,
+    projectionReady,
+    projectionStarted,
+    projectionViewResolution,
+    projectionWorkflowInputs,
+    projecting,
+    runComfyWorkflow,
+    selectedProjectionWorkflow,
+    subscribeToComfyWorkflowProgress,
+    texturableMesh,
+    updateProjectNode
+  ])
+
   const handleRunTextureWorkflow = useCallback(async () => {
     if (texturing || !selectedTextureWorkflow || !texturableMesh?.textureCanvas || !texturableMesh?.maskCanvas) {
       return;
@@ -4714,7 +5285,7 @@ export default function MeshEditorPage() {
             </div>
           )}
 
-          <div className={`mesh-editor-workspace ${activeMenu === 'painting' ? 'mesh-editor-workspace--with-layers' : ''}`}>
+          <div className={`mesh-editor-workspace ${(activeMenu === 'painting' || activeMenu === 'projection') ? 'mesh-editor-workspace--with-layers' : ''}`}>
             <aside className="mesh-editor-sidebar">
               <div className="mesh-editor-panel mesh-editor-panel--compact">
                 <span className="mesh-editor-panel__label">Tools</span>
@@ -4746,6 +5317,16 @@ export default function MeshEditorPage() {
                   >
                     <span className="material-symbols-outlined">brush</span>
                     <span>Painting</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`mesh-editor-mode-btn ${activeMenu === 'projection' ? 'mesh-editor-mode-btn--active' : ''}`}
+                    onClick={() => setActiveMenu('projection')}
+                    disabled={!textureModesSupported}
+                    title={textureModesDisabledReason || undefined}
+                  >
+                    <span className="material-symbols-outlined">filter_center_focus</span>
+                    <span>Projection</span>
                   </button>
                   <button
                     type="button"
@@ -5129,6 +5710,7 @@ export default function MeshEditorPage() {
                                         className="mesh-editor-btn mesh-editor-btn--ghost"
                                         onClick={() => {
                                           setPendingAssetParamId(param.id);
+                                          setPendingAssetSelectorMode('texturing');
                                           setShowAssetSelector(true);
                                         }}
                                         disabled={!!texturingUnavailableReason || !!pendingPatch || texturing}
@@ -5295,6 +5877,215 @@ export default function MeshEditorPage() {
                           <span className="mesh-editor-panel__hint">Paint directly on the mesh view, then run a 2-image ComfyUI inpaint workflow.</span>
                           <span className="mesh-editor-panel__hint">The editor now sends a camera-view mask to AI and reprojects the generated patch back onto the texture.</span>
                           <span className="mesh-editor-panel__hint">The camera stays locked while a paint mask exists. Clear the mask to orbit again.</span>
+                        </>
+                      )}
+                    </div>
+                  </>
+                ) : activeMenu === 'projection' ? (
+                  <>{/* PROJECTION */}
+                    <div className="mesh-editor-panel__section">
+                      <span className="mesh-editor-panel__section-title">Projection setup</span>
+                      <label className="mesh-editor-range-field">
+                        <span>Texture size</span>
+                        <input
+                          type="range"
+                          min="512"
+                          max="4096"
+                          step="256"
+                          value={projectionTextureSize}
+                          onChange={event => setProjectionTextureSize(Number(event.target.value))}
+                          disabled={projectionStarted || projecting}
+                        />
+                        <strong>{projectionTextureSize}px</strong>
+                      </label>
+                      <label className="mesh-editor-range-field">
+                        <span>Position view resolution</span>
+                        <input
+                          type="range"
+                          min="512"
+                          max="2048"
+                          step="128"
+                          value={projectionViewResolution}
+                          onChange={event => setProjectionViewResolution(Number(event.target.value))}
+                          disabled={projecting}
+                        />
+                        <strong>{projectionViewResolution}px</strong>
+                      </label>
+                      <label className="mesh-editor-range-field">
+                        <span>Blend overlap</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="64"
+                          step="1"
+                          value={projectionBlendPixels}
+                          onChange={event => setProjectionBlendPixels(Number(event.target.value))}
+                          disabled={!projectionStarted || projecting}
+                        />
+                        <strong>{projectionBlendPixels}px</strong>
+                      </label>
+
+                      <div className="mesh-editor-icon-grid mesh-editor-icon-grid--double">
+                        <button
+                          type="button"
+                          className="mesh-editor-btn mesh-editor-btn--secondary"
+                          onClick={handleStartProjectionSession}
+                          disabled={!!texturingUnavailableReason || projecting || projectionRebuilding}
+                        >
+                          <span className="material-symbols-outlined">refresh</span>
+                          <span>{projectionStarted ? 'Restart' : 'Start'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="mesh-editor-btn mesh-editor-btn--primary"
+                          onClick={handleRunProjectionWorkflow}
+                          disabled={!projectionReady || !projectionStarted || projecting || comfyLoading || projectionRebuilding}
+                        >
+                          <span className="material-symbols-outlined">play_arrow</span>
+                          <span>{projecting ? 'Projecting…' : 'Project view'}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mesh-editor-panel__section">
+                      <span className="mesh-editor-panel__section-title">AI workflow</span>
+                      <select
+                        className="mesh-editor-panel__input mesh-editor-panel__select"
+                        value={projectionWorkflowId}
+                        onChange={event => setProjectionWorkflowId(event.target.value)}
+                        disabled={comfyLoading || projectionWorkflows.length === 0 || !!texturingUnavailableReason || projecting}
+                      >
+                        {projectionWorkflows.length === 0 ? (
+                          <option value="">No compatible ComfyUI workflow found</option>
+                        ) : (
+                          projectionWorkflows.map(workflow => (
+                            <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
+                          ))
+                        )}
+                      </select>
+
+                      {selectedProjectionWorkflow && (
+                        <div className="mesh-editor-panel__section">
+                          <span className="mesh-editor-panel__section-title">Image Inputs Configuration</span>
+                          {(selectedProjectionWorkflow.parameters || [])
+                            .filter(input => getWorkflowValueType(input) === 'image')
+                            .map(param => {
+                              const config = projectionImageParamSources[param.id] || { type: 'none' }
+                              return (
+                                <div key={param.id} className="mesh-editor-workflow-field">
+                                  <span>{param.name}</span>
+                                  <select
+                                    className="mesh-editor-panel__input mesh-editor-panel__select"
+                                    value={config.type}
+                                    onChange={(e) => handleProjectionImageParamSourceChange(param.id, e.target.value)}
+                                    disabled={!!texturingUnavailableReason || projecting || projectionRebuilding}
+                                  >
+                                    <option value="none">— Not used —</option>
+                                    <option value="position-view">Use as Position View</option>
+                                    <option value="asset">From assets</option>
+                                    <option value="file">From computer</option>
+                                  </select>
+
+                                  {config.type === 'asset' && (
+                                    <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem' }}>
+                                      <span className="mesh-editor-panel__hint" style={{ flex: 1 }}>{config.assetName || 'No asset selected'}</span>
+                                      <button
+                                        type="button"
+                                        className="mesh-editor-btn mesh-editor-btn--ghost"
+                                        onClick={() => {
+                                          setPendingAssetParamId(param.id)
+                                          setPendingAssetSelectorMode('projection')
+                                          setShowAssetSelector(true)
+                                        }}
+                                        disabled={!!texturingUnavailableReason || projecting || projectionRebuilding}
+                                      >
+                                        Browse
+                                      </button>
+                                    </div>
+                                  )}
+
+                                  {config.type === 'file' && (
+                                    <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem' }}>
+                                      <span className="mesh-editor-panel__hint" style={{ flex: 1 }}>{config.fileName || 'No file chosen'}</span>
+                                      <label className="mesh-editor-btn mesh-editor-btn--ghost" style={{ cursor: 'pointer' }}>
+                                        Choose file
+                                        <input
+                                          type="file"
+                                          accept="image/*"
+                                          style={{ display: 'none' }}
+                                          onChange={(e) => {
+                                            const file = e.target.files?.[0]
+                                            if (file) {
+                                              handleProjectionImageParamSourceChange(param.id, 'file', file)
+                                            }
+                                          }}
+                                          disabled={!!texturingUnavailableReason || projecting || projectionRebuilding}
+                                        />
+                                      </label>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                        </div>
+                      )}
+
+                      {projectionWorkflowParameters.map(parameter => {
+                        const valueType = getWorkflowValueType(parameter)
+                        const currentValue = projectionWorkflowInputs?.[parameter.id]
+
+                        return (
+                          <label key={parameter.id} className="mesh-editor-workflow-field">
+                            <span>{parameter.name}</span>
+                            {valueType === 'boolean' ? (
+                              <button
+                                type="button"
+                                className={`mesh-editor-toggle ${currentValue ? 'mesh-editor-toggle--active' : ''}`}
+                                onClick={() => setProjectionWorkflowInputs(current => ({
+                                  ...current,
+                                  [parameter.id]: !currentValue
+                                }))}
+                                disabled={!!texturingUnavailableReason || projecting || projectionRebuilding}
+                              >
+                                {currentValue ? 'Enabled' : 'Disabled'}
+                              </button>
+                            ) : valueType === 'string' ? (
+                              <textarea
+                                className="mesh-editor-panel__input mesh-editor-panel__textarea"
+                                value={currentValue ?? ''}
+                                onChange={event => setProjectionWorkflowInputs(current => ({
+                                  ...current,
+                                  [parameter.id]: event.target.value
+                                }))}
+                                disabled={!!texturingUnavailableReason || projecting || projectionRebuilding}
+                              />
+                            ) : (
+                              <input
+                                type="number"
+                                className="mesh-editor-panel__input"
+                                value={currentValue ?? ''}
+                                onChange={event => setProjectionWorkflowInputs(current => ({
+                                  ...current,
+                                  [parameter.id]: event.target.value === '' ? '' : Number(event.target.value)
+                                }))}
+                                disabled={!!texturingUnavailableReason || projecting || projectionRebuilding}
+                              />
+                            )}
+                          </label>
+                        )
+                      })}
+                    </div>
+
+                    <div className="mesh-editor-panel__notes">
+                      {texturingUnavailableReason ? (
+                        <span className="mesh-editor-panel__hint">{texturingUnavailableReason}</span>
+                      ) : (
+                        <>
+                          <span className="mesh-editor-panel__hint">Start clears the working texture to transparent and initializes projection coverage.</span>
+                          <span className="mesh-editor-panel__hint">Position View is a square screenshot from the current camera. Projection fills uncovered texels first.</span>
+                          <span className="mesh-editor-panel__hint">Blend overlap controls the transition zone at the projected border.</span>
+                          <span className="mesh-editor-panel__hint">Crop border trims the alpha silhouette border of each projected view before reprojection.</span>
+                          {projectionRebuilding && <span className="mesh-editor-panel__hint">Rebuilding projection stack...</span>}
                         </>
                       )}
                     </div>
@@ -5519,7 +6310,7 @@ export default function MeshEditorPage() {
 
             <div
               ref={canvasShellRef}
-              className={`mesh-editor-canvas-shell ${(activeMenu === 'texturing' || activeMenu === 'painting') ? 'mesh-editor-canvas-shell--texturing' : ''}`}
+              className={`mesh-editor-canvas-shell ${(activeMenu === 'texturing' || activeMenu === 'painting' || activeMenu === 'projection') ? 'mesh-editor-canvas-shell--texturing' : ''}`}
               onPointerDown={handleCanvasPointerDown}
               onPointerMove={handleCanvasPointerMove}
               onPointerUp={handleCanvasPointerUp}
@@ -5553,7 +6344,7 @@ export default function MeshEditorPage() {
                       shadow-camera-far={120}
                     />
                     <directionalLight position={[-5, 3, -4]} intensity={0.6} color="#8ff5ff" />
-                    {(activeMenu === 'texturing' || activeMenu === 'painting') && texturableMesh?.root && displayTextureRef.current && (activeMenu !== 'texturing' || maskTextureRef.current) ? (
+                    {(activeMenu === 'texturing' || activeMenu === 'painting' || activeMenu === 'projection') && texturableMesh?.root && displayTextureRef.current && (activeMenu !== 'texturing' || maskTextureRef.current) ? (
                       <TexturedMesh
                         key={textureRevision}
                         root={texturableMesh.root}
@@ -5625,6 +6416,8 @@ export default function MeshEditorPage() {
                       frameKey={meshFrameKey}
                       onCameraReady={camera => { cameraRef.current = camera }}
                       controlsEnabled={activeMenu !== 'texturing' || !hasProjectionMask}
+                      allowPan={activeMenu !== 'projection'}
+                      lockToCenter={activeMenu === 'projection'}
                     />
                   </Canvas>
                   {selectionBox && activeMenu === 'modeling' && (
@@ -5797,6 +6590,150 @@ export default function MeshEditorPage() {
                 </div>
               </aside>
             )}
+
+            {activeMenu === 'projection' && (
+              <aside className="mesh-editor-layers-panel">
+                <div className="mesh-editor-layers-panel__header">
+                  <span className="mesh-editor-layers-panel__title">Projections</span>
+                  <span className="mesh-editor-panel__hint">{projectionLayers.length}</span>
+                </div>
+                {projectionRebuilding && (
+                  <div className="mesh-editor-rebuild-progress">
+                    <div
+                      className="mesh-editor-rebuild-progress__bar"
+                      style={{ width: `${Math.round(projectionRebuildProgress * 100)}%` }}
+                    />
+                  </div>
+                )}
+                <div className="mesh-editor-layers-panel__list">
+                  {projectionLayers.length === 0 ? (
+                    <div className="mesh-editor-layers-panel__empty">
+                      No projections yet — run Projection to add one.
+                    </div>
+                  ) : (
+                    [...projectionLayers].slice().reverse().map((layer, reverseIndex) => {
+                      const index = projectionLayers.length - 1 - reverseIndex
+                      const isFirst = index === projectionLayers.length - 1
+                      const isLast = index === 0
+                      const draft = projectionLayerDrafts[layer.id]
+                      const draftBlendPixels = draft?.blendPixels ?? layer.blendPixels
+                      const draftCropBorder = draft?.cropBorder ?? (layer.cropBorder || 0)
+                      const isDirty = draft !== undefined && (
+                        draftBlendPixels !== layer.blendPixels ||
+                        draftCropBorder !== (layer.cropBorder || 0)
+                      )
+
+                      return (
+                        <div key={layer.id} className="mesh-editor-layer-card">
+                          <div className="mesh-editor-layer-card__header">
+                            <button
+                              type="button"
+                              className="mesh-editor-layer-card__icon-btn"
+                              title={layer.visible ? 'Hide projection' : 'Show projection'}
+                              onClick={() => handleUpdateProjectionLayer(layer.id, { visible: !layer.visible })}
+                            >
+                              <span className="material-symbols-outlined">{layer.visible ? 'visibility' : 'visibility_off'}</span>
+                            </button>
+                            <input
+                              className="mesh-editor-layer-card__name"
+                              value={layer.name}
+                              onChange={e => handleUpdateProjectionLayer(layer.id, { name: e.target.value })}
+                            />
+                            <button
+                              type="button"
+                              className="mesh-editor-layer-card__icon-btn"
+                              title="Move up"
+                              disabled={isFirst || projectionRebuilding}
+                              onClick={() => handleMoveProjectionLayer(layer.id, 'up')}
+                            >
+                              <span className="material-symbols-outlined">keyboard_arrow_up</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="mesh-editor-layer-card__icon-btn"
+                              title="Move down"
+                              disabled={isLast || projectionRebuilding}
+                              onClick={() => handleMoveProjectionLayer(layer.id, 'down')}
+                            >
+                              <span className="material-symbols-outlined">keyboard_arrow_down</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="mesh-editor-layer-card__icon-btn"
+                              title="Delete projection"
+                              disabled={projectionRebuilding}
+                              onClick={() => handleDeleteProjectionLayer(layer.id)}
+                            >
+                              <span className="material-symbols-outlined">delete</span>
+                            </button>
+                          </div>
+
+                          <div className="mesh-editor-layer-card__row">
+                            <span>Blend overlap</span>
+                            <input
+                              type="range" min="0" max="64" step="1"
+                              value={draftBlendPixels}
+                              onChange={e => setProjectionLayerDrafts(prev => ({
+                                ...prev,
+                                [layer.id]: {
+                                  blendPixels: Number(e.target.value),
+                                  cropBorder: prev[layer.id]?.cropBorder ?? (layer.cropBorder || 0)
+                                }
+                              }))}
+                              disabled={projectionRebuilding}
+                            />
+                          </div>
+                          <div className="mesh-editor-layer-card__row">
+                            <span>Border blend</span>
+                            <strong>{draftBlendPixels}px</strong>
+                          </div>
+                          <div className="mesh-editor-layer-card__row">
+                            <span>Crop border</span>
+                            <input
+                              type="range" min="0" max={Math.max(0, Math.floor((layer.sendResolution || projectionViewResolution) / 2) - 1)} step="1"
+                              value={draftCropBorder}
+                              onChange={e => setProjectionLayerDrafts(prev => ({
+                                ...prev,
+                                [layer.id]: {
+                                  cropBorder: Number(e.target.value),
+                                  blendPixels: prev[layer.id]?.blendPixels ?? layer.blendPixels
+                                }
+                              }))}
+                              disabled={projectionRebuilding}
+                            />
+                          </div>
+                          <div className="mesh-editor-layer-card__row">
+                            <span>Crop</span>
+                            <strong>{draftCropBorder}px</strong>
+                          </div>
+                          <div className="mesh-editor-layer-card__row">
+                            <span>Capture</span>
+                            <strong>{layer.sendResolution}px</strong>
+                          </div>
+                          {isDirty && (
+                            <button
+                              type="button"
+                              className="mesh-editor-layer-card__apply-btn"
+                              disabled={projectionRebuilding}
+                              onClick={() => {
+                                handleUpdateProjectionLayer(layer.id, { blendPixels: draftBlendPixels, cropBorder: draftCropBorder })
+                                setProjectionLayerDrafts(prev => {
+                                  const next = { ...prev }
+                                  delete next[layer.id]
+                                  return next
+                                })
+                              }}
+                            >
+                              Apply
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+              </aside>
+            )}
           </div>
         </section>
       </main>
@@ -5838,14 +6775,20 @@ export default function MeshEditorPage() {
           assetType="image"
           onSelect={(asset) => {
             if (pendingAssetParamId) {
-              handleImageParamSourceChange(pendingAssetParamId, 'asset', asset);
+              if (pendingAssetSelectorMode === 'projection') {
+                handleProjectionImageParamSourceChange(pendingAssetParamId, 'asset', asset)
+              } else {
+                handleImageParamSourceChange(pendingAssetParamId, 'asset', asset)
+              }
             }
             setShowAssetSelector(false);
             setPendingAssetParamId(null);
+            setPendingAssetSelectorMode('texturing')
           }}
           onClose={() => {
             setShowAssetSelector(false);
             setPendingAssetParamId(null);
+            setPendingAssetSelectorMode('texturing')
           }}
           showEdits
         />

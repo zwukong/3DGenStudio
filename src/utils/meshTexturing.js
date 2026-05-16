@@ -741,6 +741,48 @@ function createTexturedRenderClone(root, textureKey, displayTexture) {
   }
 }
 
+function createLitGeometryRenderClone(root) {
+  if (!root) {
+    return { object: null, dispose: () => {} }
+  }
+
+  const object = root.clone(true)
+  const materials = []
+
+  object.traverse(child => {
+    if (!child.isMesh) {
+      return
+    }
+
+    child.castShadow = false
+    child.receiveShadow = false
+
+    const sourceMaterials = Array.isArray(child.material) ? child.material : [child.material]
+    const nextMaterials = sourceMaterials.map(sourceMaterial => {
+      const material = new THREE.MeshStandardMaterial({
+        color: sourceMaterial?.color?.clone?.() || new THREE.Color('#cfd6df'),
+        roughness: 0.78,
+        metalness: 0.04,
+        side: sourceMaterial?.side ?? THREE.FrontSide,
+        transparent: false,
+        opacity: 1,
+        flatShading: false
+      })
+      materials.push(material)
+      return material
+    })
+
+    child.material = Array.isArray(child.material) ? nextMaterials : nextMaterials[0]
+  })
+
+  return {
+    object,
+    dispose: () => {
+      materials.forEach(material => material?.dispose?.())
+    }
+  }
+}
+
 function createProjectionRenderCamera(camera, aspect) {
   if (!camera?.clone) {
     return null
@@ -785,7 +827,16 @@ function createProjectionScene(renderObject) {
   return scene
 }
 
-export function captureTexturedMeshView({ root, textureKey, displayTexture, camera, width, height, targetContext }) {
+export function captureTexturedMeshView({
+  root,
+  textureKey,
+  displayTexture,
+  camera,
+  width,
+  height,
+  targetContext,
+  renderMode = 'textured'
+}) {
   if (!root || !displayTexture || !camera || !width || !height) {
     throw new Error('The mesh projection view could not be rendered.')
   }
@@ -795,7 +846,9 @@ export function captureTexturedMeshView({ root, textureKey, displayTexture, came
   const renderHeight = targetContext?.canvas?.height || height
 
   const projectionCamera = createProjectionRenderCamera(camera, renderWidth / renderHeight)
-  const { object, dispose } = createTexturedRenderClone(root, textureKey, displayTexture)
+  const { object, dispose } = renderMode === 'lit-geometry'
+    ? createLitGeometryRenderClone(root)
+    : createTexturedRenderClone(root, textureKey, displayTexture)
   const scene = createProjectionScene(object)
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -959,6 +1012,87 @@ function waitForNextFrame() {
 
     setTimeout(resolve, 0)
   })
+}
+
+function buildCoverageBlendWeights(coverageMap, textureWidth, textureHeight, blendPixels = 0) {
+  const pixelCount = textureWidth * textureHeight
+  if (!coverageMap || coverageMap.length !== pixelCount) {
+    return null
+  }
+
+  const weights = new Float32Array(pixelCount)
+  const radius = Math.max(0, Number(blendPixels) || 0)
+
+  if (radius <= 0) {
+    for (let i = 0; i < pixelCount; i += 1) {
+      weights[i] = coverageMap[i] > 0 ? 0 : 1
+    }
+    return weights
+  }
+
+  // Approximate Euclidean distance transform (chamfer metric) from uncovered
+  // texels. This keeps overlap blending linear-time even on large textures.
+  const INF = 1 << 29
+  const ORTHO = 10
+  const DIAG = 14
+  const dist = new Int32Array(pixelCount)
+  let hasUncovered = false
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    if (coverageMap[i] > 0) {
+      dist[i] = INF
+    } else {
+      dist[i] = 0
+      hasUncovered = true
+    }
+  }
+
+  if (!hasUncovered) {
+    return weights
+  }
+
+  for (let y = 0; y < textureHeight; y += 1) {
+    for (let x = 0; x < textureWidth; x += 1) {
+      const i = y * textureWidth + x
+      let best = dist[i]
+      if (x > 0) best = Math.min(best, dist[i - 1] + ORTHO)
+      if (y > 0) best = Math.min(best, dist[i - textureWidth] + ORTHO)
+      if (x > 0 && y > 0) best = Math.min(best, dist[i - textureWidth - 1] + DIAG)
+      if (x + 1 < textureWidth && y > 0) best = Math.min(best, dist[i - textureWidth + 1] + DIAG)
+      dist[i] = best
+    }
+  }
+
+  for (let y = textureHeight - 1; y >= 0; y -= 1) {
+    for (let x = textureWidth - 1; x >= 0; x -= 1) {
+      const i = y * textureWidth + x
+      let best = dist[i]
+      if (x + 1 < textureWidth) best = Math.min(best, dist[i + 1] + ORTHO)
+      if (y + 1 < textureHeight) best = Math.min(best, dist[i + textureWidth] + ORTHO)
+      if (x > 0 && y + 1 < textureHeight) best = Math.min(best, dist[i + textureWidth - 1] + DIAG)
+      if (x + 1 < textureWidth && y + 1 < textureHeight) best = Math.min(best, dist[i + textureWidth + 1] + DIAG)
+      dist[i] = best
+    }
+  }
+
+  const radiusCost = Math.max(1, Math.round(radius * ORTHO))
+  const denom = radiusCost + 1
+  for (let i = 0; i < pixelCount; i += 1) {
+    if (coverageMap[i] <= 0) {
+      weights[i] = 1
+      continue
+    }
+
+    const d = dist[i]
+    if (d > radiusCost) {
+      weights[i] = 0
+      continue
+    }
+
+    weights[i] = Math.max(0, 1 - d / denom)
+  }
+
+  return weights
 }
 
 export async function applyProjectedTexturePatch(params) {
@@ -1237,7 +1371,10 @@ export async function accumulateProjectedPatch({
   textureWidth,
   textureHeight,
   onProgress = null,
-	binaryMask = false
+  binaryMask = false,
+  coverageMap = null,
+  blendPixels = 0,
+  markCoverage = false
 }) {
   if (!root || !camera || !maskCanvas || !bbox || !patchImage || !accumulatedColor || !accumulatedWeight) {
     return { processedSamples: 0, appliedSamples: 0, activePixelCount: 0 }
@@ -1288,6 +1425,11 @@ export async function accumulateProjectedPatch({
   raycaster.firstHitOnly = true
   const pointer = new THREE.Vector2()
   const activePixelCount = countActiveProjectionPixels(maskData)
+  const coverageWeights = buildCoverageBlendWeights(coverageMap, textureWidth, textureHeight, blendPixels)
+  const touchedCoverage = markCoverage && coverageMap && coverageMap.length === textureWidth * textureHeight
+    ? new Uint8Array(textureWidth * textureHeight)
+    : null
+  const touchedCoverageIndices = touchedCoverage ? [] : null
 
   camera.updateMatrixWorld?.(true)
   root.updateMatrixWorld?.(true)
@@ -1426,6 +1568,12 @@ export async function accumulateProjectedPatch({
               continue
             }
 
+            const pixelIdx = py * textureWidth + px
+            const coverageWeight = coverageWeights ? coverageWeights[pixelIdx] : 1
+            if (coverageWeight <= 1e-6) {
+              continue
+            }
+
             // Interpolated 3D world position of this UV texel
             tmpWorld.set(
               vA.x * w0 + vB.x * w1 + vC.x * w2,
@@ -1466,14 +1614,19 @@ export async function accumulateProjectedPatch({
             }
 
             const idx = (py * textureWidth + px) * 4
-            const pixelIdx = py * textureWidth + px
 
             if (binaryMask) {
-              accumulatedColor[idx]     = patchData[nearestIdx]
-              accumulatedColor[idx + 1] = patchData[nearestIdx + 1]
-              accumulatedColor[idx + 2] = patchData[nearestIdx + 2]
-              accumulatedColor[idx + 3] = patchData[nearestIdx + 3]
-              accumulatedWeight[pixelIdx] = 1.0
+              const alphaNorm = patchData[nearestIdx + 3] / 255
+              if (alphaNorm <= 0.02) {
+                continue
+              }
+
+              const weight = coverageWeight * alphaNorm
+              accumulatedColor[idx]     = patchData[nearestIdx] * weight
+              accumulatedColor[idx + 1] = patchData[nearestIdx + 1] * weight
+              accumulatedColor[idx + 2] = patchData[nearestIdx + 2] * weight
+              accumulatedColor[idx + 3] = patchData[nearestIdx + 3] * weight
+              accumulatedWeight[pixelIdx] = Math.max(accumulatedWeight[pixelIdx], weight)
             } else {
               // Bilinear sample of patch + mask at the projected screen point
               const fxLocal = sxF - bbox.x - 0.5
@@ -1499,6 +1652,7 @@ export async function accumulateProjectedPatch({
               const sampleG = patchData[i00 + 1] * w00 + patchData[i10 + 1] * w10 + patchData[i01 + 1] * w01 + patchData[i11 + 1] * w11
               const sampleB = patchData[i00 + 2] * w00 + patchData[i10 + 2] * w10 + patchData[i01 + 2] * w01 + patchData[i11 + 2] * w11
               const sampleA = patchData[i00 + 3] * w00 + patchData[i10 + 3] * w10 + patchData[i01 + 3] * w01 + patchData[i11 + 3] * w11
+              const sampleAlphaNorm = sampleA / 255
 
               const maskAlpha = (
                 maskData[i00 + 3] * w00
@@ -1507,16 +1661,21 @@ export async function accumulateProjectedPatch({
                 + maskData[i11 + 3] * w11
               ) / 255
 
-              if (maskAlpha <= 0.01) {
+              if (maskAlpha <= 0.01 || sampleAlphaNorm <= 0.02) {
                 continue
               }
 
-              const weight = maskAlpha * clampedViewOpacity
+              const weight = maskAlpha * clampedViewOpacity * coverageWeight * sampleAlphaNorm
               accumulatedColor[idx]     += sampleR * weight
               accumulatedColor[idx + 1] += sampleG * weight
               accumulatedColor[idx + 2] += sampleB * weight
               accumulatedColor[idx + 3] += sampleA * weight
               accumulatedWeight[pixelIdx] += weight
+            }
+
+            if (touchedCoverage && !touchedCoverage[pixelIdx]) {
+              touchedCoverage[pixelIdx] = 1
+              touchedCoverageIndices.push(pixelIdx)
             }
             appliedSamples += 1
           }
@@ -1540,11 +1699,18 @@ export async function accumulateProjectedPatch({
       onProgress(1)
     }
 
+    if (coverageMap && touchedCoverageIndices?.length) {
+      for (let i = 0; i < touchedCoverageIndices.length; i += 1) {
+        coverageMap[touchedCoverageIndices[i]] = 1
+      }
+    }
+
     return {
       durationMs: performance.now() - startedAt,
       activePixelCount,
       processedSamples,
-      appliedSamples
+      appliedSamples,
+      coveredPixels: touchedCoverageIndices?.length || 0
     }
   }
 }
@@ -1553,7 +1719,12 @@ export async function accumulateProjectedPatch({
  * Normalizes the accumulated color/weight buffers and blends the result into
  * textureCanvas in-place. Call this once after all views have been accumulated.
  */
-export function finalizeProjectedPatch({ textureCanvas, accumulatedColor, accumulatedWeight }) {
+export function finalizeProjectedPatch({
+  textureCanvas,
+  accumulatedColor,
+  accumulatedWeight,
+  gapFillRadius = 0
+}) {
   const textureWidth = textureCanvas.width
   const textureHeight = textureCanvas.height
   const textureContext = textureCanvas.getContext('2d')
@@ -1575,6 +1746,65 @@ export function finalizeProjectedPatch({ textureCanvas, accumulatedColor, accumu
     textureImageData.data[colorIndex + 2] = Math.round(textureImageData.data[colorIndex + 2] * (1 - blend) + (accumulatedColor[colorIndex + 2] / weight) * blend)
     textureImageData.data[colorIndex + 3] = Math.round(textureImageData.data[colorIndex + 3] * (1 - blend) + (accumulatedColor[colorIndex + 3] / weight) * blend)
     appliedPixels += 1
+  }
+
+  const fillRadius = Math.max(0, Math.min(4, Math.floor(gapFillRadius)))
+  if (fillRadius > 0) {
+    const sourceData = new Uint8ClampedArray(textureImageData.data)
+
+    for (let pixelIndex = 0; pixelIndex < accumulatedWeight.length; pixelIndex += 1) {
+      if (accumulatedWeight[pixelIndex] > 0) {
+        continue
+      }
+
+      const x = pixelIndex % textureWidth
+      const y = Math.floor(pixelIndex / textureWidth)
+      let sumR = 0
+      let sumG = 0
+      let sumB = 0
+      let sumA = 0
+      let hits = 0
+
+      for (let dy = -fillRadius; dy <= fillRadius; dy += 1) {
+        const ny = y + dy
+        if (ny < 0 || ny >= textureHeight) {
+          continue
+        }
+
+        for (let dx = -fillRadius; dx <= fillRadius; dx += 1) {
+          if (dx === 0 && dy === 0) {
+            continue
+          }
+
+          const nx = x + dx
+          if (nx < 0 || nx >= textureWidth) {
+            continue
+          }
+
+          const neighborIndex = ny * textureWidth + nx
+          if (accumulatedWeight[neighborIndex] <= 0) {
+            continue
+          }
+
+          const sourceIndex = neighborIndex * 4
+          sumR += sourceData[sourceIndex]
+          sumG += sourceData[sourceIndex + 1]
+          sumB += sourceData[sourceIndex + 2]
+          sumA += sourceData[sourceIndex + 3]
+          hits += 1
+        }
+      }
+
+      if (hits <= 0) {
+        continue
+      }
+
+      const colorIndex = pixelIndex * 4
+      textureImageData.data[colorIndex] = Math.round(sumR / hits)
+      textureImageData.data[colorIndex + 1] = Math.round(sumG / hits)
+      textureImageData.data[colorIndex + 2] = Math.round(sumB / hits)
+      textureImageData.data[colorIndex + 3] = Math.round(sumA / hits)
+    }
   }
 
   textureContext.putImageData(textureImageData, 0, 0)
