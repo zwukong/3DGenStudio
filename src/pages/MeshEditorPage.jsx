@@ -78,8 +78,657 @@ import './MeshEditorPage.css'
 import AssetSelectorModal from '../components/AssetSelectorModal';
 import SculptToolsPanel from '../components/SculptToolsPanel';
 
-const AUTO_PROJECTION_SEAM_SAFE_CROP_PX = 2
-const AUTO_PROJECTION_SEAM_SAFE_BLEND_PX = 10
+const AUTO_PROJECTION_SEAM_SAFE_CROP_PX = 0
+const AUTO_PROJECTION_SEAM_SAFE_BLEND_PX = 0
+
+function drawProjectionCheckerboard(context, width, height) {
+  if (!context || !width || !height) {
+    return
+  }
+
+  const cellSize = Math.max(16, Math.round(width / 64))
+  for (let cy = 0; cy < height; cy += cellSize) {
+    for (let cx = 0; cx < width; cx += cellSize) {
+      context.fillStyle = (((cx / cellSize) + (cy / cellSize)) % 2 === 0) ? '#585858' : '#3a3a3a'
+      context.fillRect(cx, cy, cellSize, cellSize)
+    }
+  }
+}
+
+function computeProjectionDistanceInsideMask(mask, width, height) {
+  const pixelCount = width * height
+  const dist = new Int32Array(pixelCount)
+  if (!mask || mask.length !== pixelCount || !width || !height) {
+    return dist
+  }
+
+  const INF = 1 << 29
+  const ORTHO = 10
+  const DIAG = 14
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    dist[i] = mask[i] > 0 ? INF : 0
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = y * width + x
+      let best = dist[i]
+      if (x > 0) best = Math.min(best, dist[i - 1] + ORTHO)
+      if (y > 0) best = Math.min(best, dist[i - width] + ORTHO)
+      if (x > 0 && y > 0) best = Math.min(best, dist[i - width - 1] + DIAG)
+      if (x + 1 < width && y > 0) best = Math.min(best, dist[i - width + 1] + DIAG)
+      dist[i] = best
+    }
+  }
+
+  for (let y = height - 1; y >= 0; y -= 1) {
+    for (let x = width - 1; x >= 0; x -= 1) {
+      const i = y * width + x
+      let best = dist[i]
+      if (x + 1 < width) best = Math.min(best, dist[i + 1] + ORTHO)
+      if (y + 1 < height) best = Math.min(best, dist[i + width] + ORTHO)
+      if (x > 0 && y + 1 < height) best = Math.min(best, dist[i + width - 1] + DIAG)
+      if (x + 1 < width && y + 1 < height) best = Math.min(best, dist[i + width + 1] + DIAG)
+      dist[i] = best
+    }
+  }
+
+  return dist
+}
+
+function buildProjectionOverlapWeights(previousCoverage, previousSharedCoverage, layerCoverage, layerSharedMask, width, height, blendPixels = 0) {
+  const pixelCount = width * height
+  if (
+    !previousCoverage
+    || !layerCoverage
+    || previousCoverage.length !== pixelCount
+    || layerCoverage.length !== pixelCount
+  ) {
+    return null
+  }
+
+  const weights = new Float32Array(pixelCount)
+  const radius = Math.max(0, Number(blendPixels) || 0)
+  const maxOverlapInfluence = 0.68
+
+  if (radius <= 0) {
+    for (let i = 0; i < pixelCount; i += 1) {
+      if (!layerCoverage[i]) {
+        weights[i] = 0
+      } else if (previousCoverage[i] <= 0) {
+        weights[i] = 1
+      } else if ((previousSharedCoverage?.[i] || 0) > 0 || (layerSharedMask?.[i] || 0) > 0) {
+        weights[i] = maxOverlapInfluence
+      } else {
+        weights[i] = 0
+      }
+    }
+    return weights
+  }
+
+  const distToUntouched = computeProjectionDistanceInsideMask(previousCoverage, width, height)
+
+  const seamRadiusPx = Math.max(1, Math.min(6, Math.round(Math.max(1, radius) * 0.6)))
+  const seamRadiusCost = Math.max(10, seamRadiusPx * 10)
+  const seamDenom = seamRadiusCost + 1
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    if (!layerCoverage[i]) {
+      weights[i] = 0
+      continue
+    }
+
+    if (previousCoverage[i] <= 0) {
+      weights[i] = 1
+      continue
+    }
+
+    if ((previousSharedCoverage?.[i] || 0) <= 0 && (layerSharedMask?.[i] || 0) <= 0) {
+      weights[i] = 0
+      continue
+    }
+
+    const dUntouched = distToUntouched[i]
+    if (dUntouched > seamRadiusCost) {
+      weights[i] = 0
+      continue
+    }
+
+    const t = Math.max(0, Math.min(1, 1 - dUntouched / seamDenom))
+    const eased = t * t * (3 - 2 * t)
+    weights[i] = Math.min(maxOverlapInfluence, eased)
+  }
+
+  return weights
+}
+
+function buildProjectionCoverageMaskFromBakedAlpha(alphaBytes, width, height, {
+  minAlpha = 1,
+  stitchEdges = true
+} = {}) {
+  const pixelCount = width * height
+
+  const mask = new Uint8Array(pixelCount)
+  if (!alphaBytes || alphaBytes.length !== pixelCount || !width || !height) {
+    return mask
+  }
+
+  // Keep most anti-aliased edge texels so projected borders stay smooth.
+
+  // Tiny pinholes are still patched in a second pass below.
+  for (let i = 0; i < pixelCount; i += 1) {
+    mask[i] = alphaBytes[i] > minAlpha ? 1 : 0
+  }
+
+  if (!stitchEdges) {
+    return mask
+  }
+
+  const next = mask.slice()
+  const has = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) {
+      return 0
+    }
+    return mask[y * width + x]
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = y * width + x
+      if (mask[i]) {
+        continue
+      }
+
+      // Fill small 1px holes and stitch anti-aliased edge fragments so the
+      // overlap mask does not create zipper seams.
+      const ortho = has(x - 1, y) + has(x + 1, y) + has(x, y - 1) + has(x, y + 1)
+      const diag = has(x - 1, y - 1) + has(x + 1, y - 1) + has(x - 1, y + 1) + has(x + 1, y + 1)
+      if (ortho >= 3 || (ortho >= 2 && diag >= 2)) {
+        next[i] = 1
+      }
+    }
+  }
+
+  return next
+}
+
+function buildProjectionSharedSeamMask(coverageMask, ownershipMask, width, height, seamPixels = 0) {
+  const pixelCount = width * height
+  const sharedMask = new Uint8Array(pixelCount)
+  if (
+    !coverageMask
+    || !ownershipMask
+    || coverageMask.length !== pixelCount
+    || ownershipMask.length !== pixelCount
+    || !width
+    || !height
+  ) {
+    return sharedMask
+  }
+
+  const seamRadiusPx = Math.max(0, Math.min(8, Math.round(Number(seamPixels) || 0)))
+  if (seamRadiusPx <= 0) {
+    return sharedMask
+  }
+
+  const seamRadiusCost = Math.max(10, seamRadiusPx * 10)
+  const distToOutsideOwnership = computeProjectionDistanceInsideMask(ownershipMask, width, height)
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    if (!coverageMask[i]) {
+      continue
+    }
+
+    if (!ownershipMask[i] || distToOutsideOwnership[i] <= seamRadiusCost) {
+      sharedMask[i] = 1
+    }
+  }
+
+  return sharedMask
+}
+
+function buildProjectionConfidenceMap(accumulatedWeight, coverageMask) {
+  const pixelCount = accumulatedWeight?.length || 0
+  const confidence = new Float32Array(pixelCount)
+  if (!accumulatedWeight || !pixelCount) {
+    return confidence
+  }
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    if (coverageMask && !coverageMask[i]) {
+      continue
+    }
+
+    const weight = Math.max(0, Number(accumulatedWeight[i]) || 0)
+    if (weight <= 1e-6) {
+      continue
+    }
+
+    confidence[i] = Math.max(0, Math.min(1, 1 - Math.exp(-weight)))
+  }
+
+  return confidence
+}
+
+function applyProjectionEdgeBleed(canvas, passes = 1) {
+  if (!canvas?.width || !canvas?.height) {
+    return
+  }
+
+  const width = canvas.width
+  const height = canvas.height
+  const context = canvas.getContext('2d', { willReadFrequently: true }) || canvas.getContext('2d')
+  if (!context) {
+    return
+  }
+
+  let imageData = context.getImageData(0, 0, width, height)
+  let data = imageData.data
+  const totalPasses = Math.max(1, Math.min(2, Math.floor(passes)))
+
+  for (let pass = 0; pass < totalPasses; pass += 1) {
+    const source = new Uint8ClampedArray(data)
+    let changed = false
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x
+        const offset = index * 4
+        const a = source[offset + 3]
+        if (a > 0) {
+          continue
+        }
+
+        let sumR = 0
+        let sumG = 0
+        let sumB = 0
+        let sumA = 0
+        let count = 0
+
+        for (let dy = -1; dy <= 1; dy += 1) {
+          const ny = y + dy
+          if (ny < 0 || ny >= height) {
+            continue
+          }
+
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0) {
+              continue
+            }
+
+            const nx = x + dx
+            if (nx < 0 || nx >= width) {
+              continue
+            }
+
+            const nOffset = (ny * width + nx) * 4
+            const na = source[nOffset + 3]
+            if (na <= 0) {
+              continue
+            }
+
+            sumR += source[nOffset]
+            sumG += source[nOffset + 1]
+            sumB += source[nOffset + 2]
+            sumA += na
+            count += 1
+          }
+        }
+
+        if (count > 0) {
+          data[offset] = Math.round(sumR / count)
+          data[offset + 1] = Math.round(sumG / count)
+          data[offset + 2] = Math.round(sumB / count)
+          data[offset + 3] = Math.max(1, Math.min(255, Math.round((sumA / count) * 0.38)))
+          changed = true
+        }
+      }
+    }
+
+    if (!changed) {
+      break
+    }
+  }
+
+  context.putImageData(imageData, 0, 0)
+}
+
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value))
+}
+
+function blendRgbByMode(mode, dstR, dstG, dstB, srcR, srcG, srcB) {
+  const m = String(mode || 'source-over').toLowerCase()
+  if (m === 'multiply') {
+    return [
+      (dstR * srcR) / 255,
+      (dstG * srcG) / 255,
+      (dstB * srcB) / 255
+    ]
+  }
+
+  if (m === 'screen') {
+    return [
+      255 - ((255 - dstR) * (255 - srcR)) / 255,
+      255 - ((255 - dstG) * (255 - srcG)) / 255,
+      255 - ((255 - dstB) * (255 - srcB)) / 255
+    ]
+  }
+
+  if (m === 'overlay') {
+    const overlayChannel = (d, s) => {
+      if (d < 128) {
+        return (2 * d * s) / 255
+      }
+      return 255 - (2 * (255 - d) * (255 - s)) / 255
+    }
+    return [overlayChannel(dstR, srcR), overlayChannel(dstG, srcG), overlayChannel(dstB, srcB)]
+  }
+
+  if (m === 'darken') {
+    return [Math.min(dstR, srcR), Math.min(dstG, srcG), Math.min(dstB, srcB)]
+  }
+
+  if (m === 'lighten') {
+    return [Math.max(dstR, srcR), Math.max(dstG, srcG), Math.max(dstB, srcB)]
+  }
+
+  // Normal / source-over fallback.
+  return [srcR, srcG, srcB]
+}
+
+function compositeProjectionLayerIntoImageData({
+  outputData,
+  layerData,
+  layerCoverage,
+  ownershipMask,
+  sharedMask,
+  layerConfidence,
+  overlapWeights,
+  composedCoverage,
+  composedSharedCoverage,
+  composedConfidence,
+  seamAccumColor,
+  seamAccumWeight,
+  opacity,
+  blendMode
+}) {
+  if (
+    !outputData
+    || !layerData
+    || !layerCoverage
+    || !overlapWeights
+    || !composedCoverage
+    || !composedSharedCoverage
+    || !composedConfidence
+    || !seamAccumColor
+    || !seamAccumWeight
+  ) {
+    return 0
+  }
+
+  const pixelCount = layerCoverage.length
+  let contributed = 0
+  const op = clamp01(Number(opacity) || 0)
+
+  if (op <= 0) {
+    return 0
+  }
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    if (!layerCoverage[i]) {
+      continue
+    }
+
+    const w = overlapWeights[i]
+    if (w <= 1e-6) {
+      continue
+    }
+
+    const alpha = clamp01(op * w)
+    if (alpha <= 1e-6) {
+      continue
+    }
+
+    const j = i * 4
+    const dstR = outputData[j]
+    const dstG = outputData[j + 1]
+    const dstB = outputData[j + 2]
+    const srcR = layerData[j]
+    const srcG = layerData[j + 1]
+    const srcB = layerData[j + 2]
+    const srcAlpha = layerData[j + 3] / 255
+    if (srcAlpha <= 1e-4) {
+      continue
+    }
+
+    const [blendR, blendG, blendB] = blendRgbByMode(blendMode, dstR, dstG, dstB, srcR, srcG, srcB)
+    const effectiveAlpha = clamp01(alpha * srcAlpha)
+    if (effectiveAlpha <= 1e-6) {
+      continue
+    }
+    const confidence = Math.max(0.05, Math.min(1, layerConfidence?.[i] || effectiveAlpha))
+
+    const shouldAccumulateShared = Boolean(
+      sharedMask?.[i]
+      && (composedCoverage[i] > 0 || composedSharedCoverage[i] > 0)
+    )
+
+    if (shouldAccumulateShared) {
+      if (seamAccumWeight[i] <= 1e-6) {
+        const baseConfidence = Math.max(0.05, Math.min(1, composedConfidence[i] || 0.05))
+        seamAccumColor[j] = dstR * baseConfidence
+        seamAccumColor[j + 1] = dstG * baseConfidence
+        seamAccumColor[j + 2] = dstB * baseConfidence
+        seamAccumWeight[i] = baseConfidence
+      }
+
+      const seamWeight = effectiveAlpha * confidence
+      seamAccumColor[j] += blendR * seamWeight
+      seamAccumColor[j + 1] += blendG * seamWeight
+      seamAccumColor[j + 2] += blendB * seamWeight
+      seamAccumWeight[i] += seamWeight
+      composedSharedCoverage[i] = 1
+      composedConfidence[i] = Math.max(composedConfidence[i], confidence)
+      contributed += 1
+      continue
+    }
+
+    outputData[j] = Math.round(dstR * (1 - effectiveAlpha) + blendR * effectiveAlpha)
+    outputData[j + 1] = Math.round(dstG * (1 - effectiveAlpha) + blendG * effectiveAlpha)
+    outputData[j + 2] = Math.round(dstB * (1 - effectiveAlpha) + blendB * effectiveAlpha)
+    outputData[j + 3] = 255
+    composedConfidence[i] = Math.max(composedConfidence[i], confidence)
+
+    if (sharedMask?.[i]) {
+      composedSharedCoverage[i] = 1
+    }
+
+    if (ownershipMask?.[i]) {
+      composedCoverage[i] = 1
+      if (!sharedMask?.[i]) {
+        composedSharedCoverage[i] = 0
+      }
+    }
+
+    contributed += 1
+  }
+
+  return contributed
+}
+
+function resolveProjectionSharedSeams(outputData, seamAccumColor, seamAccumWeight) {
+  if (!outputData || !seamAccumColor || !seamAccumWeight) {
+    return
+  }
+
+  for (let i = 0; i < seamAccumWeight.length; i += 1) {
+    const weight = seamAccumWeight[i]
+    if (weight <= 1e-6) {
+      continue
+    }
+
+    const j = i * 4
+    outputData[j] = Math.round(seamAccumColor[j] / weight)
+    outputData[j + 1] = Math.round(seamAccumColor[j + 1] / weight)
+    outputData[j + 2] = Math.round(seamAccumColor[j + 2] / weight)
+    outputData[j + 3] = 255
+  }
+}
+
+function resolveProjectionLayersIntoImageData(outputData, layerSnapshots, width, height) {
+  if (!outputData || !Array.isArray(layerSnapshots) || layerSnapshots.length === 0 || !width || !height) {
+    return
+  }
+
+  const pixelCount = width * height
+
+  for (let i = 0; i < pixelCount; i += 1) {
+    const j = i * 4
+    const baseR = outputData[j]
+    const baseG = outputData[j + 1]
+    const baseB = outputData[j + 2]
+
+    let bestLayer = -1
+    let secondLayer = -1
+    let bestScore = 0
+    let secondScore = 0
+    let candidateCount = 0
+    let sharedCandidateCount = 0
+
+    for (let layerIndex = 0; layerIndex < layerSnapshots.length; layerIndex += 1) {
+      const layer = layerSnapshots[layerIndex]
+      if (!layer?.coverageMask?.[i]) {
+        continue
+      }
+
+      const srcAlpha = (layer.pixelData[j + 3] || 0) / 255
+      if (srcAlpha <= 1e-4) {
+        continue
+      }
+
+      const alpha = clamp01((layer.opacity ?? 1) * srcAlpha)
+      if (alpha <= 1e-4) {
+        continue
+      }
+
+      const confidence = Math.max(0.02, Math.min(1, layer.confidenceMap?.[i] || alpha))
+      const ownedFactor = layer.ownershipMask?.[i] ? 1 : 0.78
+      const score = confidence * alpha * ownedFactor
+      if (score <= 1e-6) {
+        continue
+      }
+
+      candidateCount += 1
+      if (layer.sharedSeamMask?.[i]) {
+        sharedCandidateCount += 1
+      }
+
+      if (score > bestScore) {
+        secondLayer = bestLayer
+        secondScore = bestScore
+        bestLayer = layerIndex
+        bestScore = score
+      } else if (score > secondScore) {
+        secondLayer = layerIndex
+        secondScore = score
+      }
+    }
+
+    if (bestLayer === -1) {
+      continue
+    }
+
+    const applySingleLayer = layerIndex => {
+      const layer = layerSnapshots[layerIndex]
+      const srcR = layer.pixelData[j]
+      const srcG = layer.pixelData[j + 1]
+      const srcB = layer.pixelData[j + 2]
+      const srcAlpha = (layer.pixelData[j + 3] || 0) / 255
+      const alpha = clamp01((layer.opacity ?? 1) * srcAlpha)
+      const [blendR, blendG, blendB] = blendRgbByMode(layer.blendMode, baseR, baseG, baseB, srcR, srcG, srcB)
+
+      outputData[j] = Math.round(baseR * (1 - alpha) + blendR * alpha)
+      outputData[j + 1] = Math.round(baseG * (1 - alpha) + blendG * alpha)
+      outputData[j + 2] = Math.round(baseB * (1 - alpha) + blendB * alpha)
+      outputData[j + 3] = 255
+    }
+
+    if (candidateCount === 1 || bestScore <= 1e-6) {
+      applySingleLayer(bestLayer)
+      continue
+    }
+
+    const shouldBlend = sharedCandidateCount >= 2 || secondScore >= bestScore * 0.72
+    if (!shouldBlend) {
+      applySingleLayer(bestLayer)
+      continue
+    }
+
+    let totalWeight = 0
+    let accumR = 0
+    let accumG = 0
+    let accumB = 0
+    let accumAlpha = 0
+    const minBlendScore = Math.max(bestScore * 0.28, 1e-5)
+
+    for (let layerIndex = 0; layerIndex < layerSnapshots.length; layerIndex += 1) {
+      const layer = layerSnapshots[layerIndex]
+      if (!layer?.coverageMask?.[i]) {
+        continue
+      }
+
+      const srcAlpha = (layer.pixelData[j + 3] || 0) / 255
+      if (srcAlpha <= 1e-4) {
+        continue
+      }
+
+      const alpha = clamp01((layer.opacity ?? 1) * srcAlpha)
+      if (alpha <= 1e-4) {
+        continue
+      }
+
+      const confidence = Math.max(0.02, Math.min(1, layer.confidenceMap?.[i] || alpha))
+      const ownedFactor = layer.ownershipMask?.[i] ? 1 : 0.78
+      const score = confidence * alpha * ownedFactor
+      if (score < minBlendScore) {
+        continue
+      }
+
+      if (sharedCandidateCount < 2 && layerIndex !== bestLayer && layerIndex !== secondLayer) {
+        continue
+      }
+
+      const srcR = layer.pixelData[j]
+      const srcG = layer.pixelData[j + 1]
+      const srcB = layer.pixelData[j + 2]
+      const [blendR, blendG, blendB] = blendRgbByMode(layer.blendMode, baseR, baseG, baseB, srcR, srcG, srcB)
+      const weight = score * score
+
+      totalWeight += weight
+      accumR += blendR * weight
+      accumG += blendG * weight
+      accumB += blendB * weight
+      accumAlpha += alpha * weight
+    }
+
+    if (totalWeight <= 1e-6) {
+      applySingleLayer(bestLayer)
+      continue
+    }
+
+    const resolvedR = accumR / totalWeight
+    const resolvedG = accumG / totalWeight
+    const resolvedB = accumB / totalWeight
+    const resolvedAlpha = clamp01(accumAlpha / totalWeight)
+
+    outputData[j] = Math.round(baseR * (1 - resolvedAlpha) + resolvedR * resolvedAlpha)
+    outputData[j + 1] = Math.round(baseG * (1 - resolvedAlpha) + resolvedG * resolvedAlpha)
+    outputData[j + 2] = Math.round(baseB * (1 - resolvedAlpha) + resolvedB * resolvedAlpha)
+    outputData[j + 3] = 255
+  }
+}
 
 function getRectangleBounds(startPoint, endPoint) {
   return {
@@ -4865,26 +5514,24 @@ export default function MeshEditorPage() {
     const textureCanvas = texturableMesh.textureCanvas
     const texW = textureCanvas.width
     const texH = textureCanvas.height
-    const coverageMap = new Uint8Array(texW * texH)
-    const faceOwnershipMap = new Map()
     const rebuildToken = ++projectionRebuildTokenRef.current
 
     setProjectionRebuilding(true)
     setProjectionRebuildProgress(0)
 
+    const rebuildStartedAt = performance.now()
+
     try {
       const textureContext = textureCanvas.getContext('2d')
       textureContext.clearRect(0, 0, texW, texH)
-
-        const cellSize = Math.max(16, Math.round(texW / 64))
-        for (let cy = 0; cy < texH; cy += cellSize) {
-          for (let cx = 0; cx < texW; cx += cellSize) {
-            textureContext.fillStyle = (((cx / cellSize) + (cy / cellSize)) % 2 === 0) ? '#585858' : '#3a3a3a'
-            textureContext.fillRect(cx, cy, cellSize, cellSize)
-          }
-        }
+      drawProjectionCheckerboard(textureContext, texW, texH)
+      const composedImage = textureContext.getImageData(0, 0, texW, texH)
+      const composedData = composedImage.data
+      const layerSnapshots = []
 
       const visibleLayers = layers.filter(layer => layer.visible !== false)
+      const totalVisibleLayers = Math.max(1, visibleLayers.length)
+
       for (let layerIndex = 0; layerIndex < visibleLayers.length; layerIndex += 1) {
         if (projectionRebuildTokenRef.current !== rebuildToken) {
           return
@@ -4893,6 +5540,8 @@ export default function MeshEditorPage() {
         const layer = visibleLayers[layerIndex]
         const layerData = projectionLayerDataRef.current.get(layer.id)
         if (!layerData?.camera || !layerData?.patchCanvas) {
+          const overall = (layerIndex + 1) / totalVisibleLayers
+          setProjectionRebuildProgress(overall)
           continue
         }
 
@@ -4900,74 +5549,188 @@ export default function MeshEditorPage() {
         const projectionCamera = layerData.camera.clone()
         projectionCamera.updateProjectionMatrix?.()
         projectionCamera.updateMatrixWorld?.(true)
+        const layerStartedAt = performance.now()
 
         const effectiveCropBorder = Math.max(AUTO_PROJECTION_SEAM_SAFE_CROP_PX, layer.cropBorder || 0)
         const effectiveBlendPixels = Math.max(AUTO_PROJECTION_SEAM_SAFE_BLEND_PX, layer.blendPixels || 0)
-        const maskCanvas = createProjectionCropMaskCanvasFromPatch(patchCanvas, effectiveCropBorder)
-        const accumulatedColor = new Float32Array(texW * texH * 4)
-        const accumulatedWeight = new Float32Array(texW * texH)
-        const previousCoverageMap = new Uint8Array(coverageMap)
+        const effectiveMaskFeather = Math.max(1, Math.min(4, Math.round(effectiveBlendPixels * 0.3)))
 
-        await accumulateProjectedPatch({
-          root: texturableMesh.root,
-          textureKey: texturableMesh.textureKey,
-          textureConfig: texturableMesh.textureConfig,
-          camera: projectionCamera,
-          maskCanvas,
-          bbox: { x: 0, y: 0, width: patchCanvas.width, height: patchCanvas.height },
-          patchImage: patchCanvas,
-          featherRadius: 0,
-          accumulatedColor,
-          accumulatedWeight,
-          textureWidth: texW,
-          textureHeight: texH,
-          coverageMap,
-          blendPixels: effectiveBlendPixels,
-          markCoverage: true,
-          binaryMask: false,
-          grazingCoverageThreshold: 0.15,
-          minFacingCos: 0.3,
-          facingPower: 2.2,
-          minMaskAlpha: 0.12,
-          unmatteFringe: true,
-          unmatteStrength: 0.92,
-          layerId: layer.id,
-          faceOwnershipMap,
-          faceLockPolicy: 'quality-aware',
-          faceLockCoverageThreshold: 0.85,
-          faceLockFacingThreshold: 0.62,
-          onProgress: progress => {
-            const overall = (layerIndex + progress) / Math.max(1, visibleLayers.length)
-            setProjectionRebuildProgress(overall)
-            if (announce) {
-              setFeedback(`Rebuilding projections... ${layerIndex + 1}/${visibleLayers.length} ${Math.round(progress * 100)}%`)
+        const bakeSignature = [
+          `tex:${texW}x${texH}`,
+          `patch:${patchCanvas.width}x${patchCanvas.height}`,
+          `crop:${effectiveCropBorder}`,
+          `blend:${effectiveBlendPixels}`,
+          `feather:${effectiveMaskFeather}`
+        ].join('|')
+
+        const requiresRebake = (
+          !layerData.bakedCanvas
+          || layerData.bakeSignature !== bakeSignature
+          || !layerData.coverageMask
+          || layerData.coverageMask.length !== texW * texH
+          || !layerData.ownershipMask
+          || layerData.ownershipMask.length !== texW * texH
+          || !layerData.sharedSeamMask
+          || layerData.sharedSeamMask.length !== texW * texH
+          || !layerData.confidenceMap
+          || layerData.confidenceMap.length !== texW * texH
+        )
+        let accumulateStats = null
+        let finalizeStats = null
+
+        if (requiresRebake) {
+          const maskCanvas = createProjectionCropMaskCanvasFromPatch(patchCanvas, effectiveCropBorder)
+          const accumulatedColor = new Float32Array(texW * texH * 4)
+          const accumulatedWeight = new Float32Array(texW * texH)
+          const bakedCanvas = document.createElement('canvas')
+          bakedCanvas.width = texW
+          bakedCanvas.height = texH
+
+          accumulateStats = await accumulateProjectedPatch({
+            root: texturableMesh.root,
+            textureKey: texturableMesh.textureKey,
+            textureConfig: texturableMesh.textureConfig,
+            camera: projectionCamera,
+            maskCanvas,
+            bbox: { x: 0, y: 0, width: patchCanvas.width, height: patchCanvas.height },
+            patchImage: patchCanvas,
+            featherRadius: effectiveMaskFeather,
+            accumulatedColor,
+            accumulatedWeight,
+            textureWidth: texW,
+            textureHeight: texH,
+            binaryMask: false,
+            grazingCoverageThreshold: 0.15,
+            minFacingCos: 0,
+            facingPower: 1.2,
+            minMaskAlpha: 0.12,
+            unmatteFringe: true,
+            unmatteStrength: 0.92,
+            layerId: layer.id,
+            faceOwnershipMap: null,
+            faceLockPolicy: 'none',
+            // Keep visibility filtering so front-view projection does not bleed
+            // through to back-facing / hidden surfaces.
+            // Raycast is slower than depth-prepass, but it is more robust for
+            // imported meshes that otherwise lose large surface areas.
+            occlusionMode: 'raycast',
+            cullBackfaces: false,
+            onProgress: progress => {
+              const overall = (layerIndex + progress) / totalVisibleLayers
+              setProjectionRebuildProgress(overall)
+              if (announce) {
+                setFeedback(`Rebuilding projections... ${layerIndex + 1}/${visibleLayers.length} ${Math.round(progress * 100)}%`)
+              }
             }
+          })
+
+          if (projectionRebuildTokenRef.current !== rebuildToken) {
+            return
           }
-        })
+
+          finalizeStats = finalizeProjectedPatch({
+            textureCanvas: bakedCanvas,
+            accumulatedColor,
+            accumulatedWeight,
+            gapFillRadius: Math.max(2, Math.round(effectiveBlendPixels / 2)),
+            previousCoverageMap: null,
+            boundaryBlendPixels: 0,
+            boundaryOnlyBlend: false
+          })
+
+          applyProjectionEdgeBleed(bakedCanvas, Math.max(1, Math.round(effectiveMaskFeather / 2)))
+
+          const bakedContext = bakedCanvas.getContext('2d', { willReadFrequently: true }) || bakedCanvas.getContext('2d')
+          const bakedData = bakedContext.getImageData(0, 0, texW, texH).data
+          const alphaBytes = new Uint8Array(texW * texH)
+          for (let i = 0; i < alphaBytes.length; i += 1) {
+            alphaBytes[i] = bakedData[i * 4 + 3]
+          }
+          const coverageMask = buildProjectionCoverageMaskFromBakedAlpha(alphaBytes, texW, texH, {
+            minAlpha: 1,
+            stitchEdges: true
+          })
+          const ownershipMask = buildProjectionCoverageMaskFromBakedAlpha(alphaBytes, texW, texH, {
+            minAlpha: 112,
+            stitchEdges: false
+          })
+          const sharedSeamMask = buildProjectionSharedSeamMask(
+            coverageMask,
+            ownershipMask,
+            texW,
+            texH,
+            effectiveBlendPixels
+          )
+          const confidenceMap = buildProjectionConfidenceMap(accumulatedWeight, coverageMask)
+
+          layerData.bakedCanvas = bakedCanvas
+          layerData.bakeSignature = bakeSignature
+          layerData.coverageMask = coverageMask
+          layerData.ownershipMask = ownershipMask
+          layerData.sharedSeamMask = sharedSeamMask
+          layerData.confidenceMap = confidenceMap
+        }
 
         if (projectionRebuildTokenRef.current !== rebuildToken) {
           return
         }
 
-        finalizeProjectedPatch({
-          textureCanvas,
-          accumulatedColor,
-          accumulatedWeight,
-          gapFillRadius: Math.max(2, Math.round(effectiveBlendPixels / 2)),
-          previousCoverageMap,
-          boundaryBlendPixels: effectiveBlendPixels,
-          boundaryOnlyBlend: true
-        })
+        const layerOpacity = Math.max(0, Math.min(1, Number(layer.opacity ?? 1)))
+        const layerBlendMode = layer.blendMode || 'source-over'
+        const layerCoverage = layerData.coverageMask
+        const layerOwnership = layerData.ownershipMask
+        const layerSharedSeam = layerData.sharedSeamMask
+        const layerConfidence = layerData.confidenceMap
+
+        if (layerData.bakedCanvas && layerOpacity > 0 && layerCoverage && layerCoverage.length === texW * texH) {
+          const bakedContext = layerData.bakedCanvas.getContext('2d', { willReadFrequently: true }) || layerData.bakedCanvas.getContext('2d')
+          const bakedImage = bakedContext.getImageData(0, 0, texW, texH)
+
+          layerSnapshots.push({
+            pixelData: bakedImage.data,
+            coverageMask: layerCoverage,
+            ownershipMask: layerOwnership,
+            sharedSeamMask: layerSharedSeam,
+            confidenceMap: layerConfidence,
+            opacity: layerOpacity,
+            blendMode: layerBlendMode,
+            blendPixels: effectiveBlendPixels
+          })
+        }
+
+        const overall = (layerIndex + 1) / totalVisibleLayers
+        setProjectionRebuildProgress(overall)
+
+        if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+          const layerDurationMs = performance.now() - layerStartedAt
+          const rebakeLabel = requiresRebake ? 'rebaked' : 'cached'
+          console.debug(
+            `[Projection] Rebuild layer ${layerIndex + 1}/${visibleLayers.length}: `
+            + `${layer.name || layer.id} in ${layerDurationMs.toFixed(1)}ms (${rebakeLabel}) `
+            + `(occlusion=${accumulateStats?.occlusionModeUsed || 'cached'}, `
+            + `applied=${accumulateStats?.appliedSamples || 0}, `
+            + `finalized=${finalizeStats?.appliedPixels || 0})`
+          )
+        }
       }
 
       if (projectionRebuildTokenRef.current !== rebuildToken) {
         return
       }
 
-      projectionCoverageRef.current = coverageMap
-  projectionFaceOwnershipRef.current = faceOwnershipMap
+      resolveProjectionLayersIntoImageData(composedData, layerSnapshots, texW, texH)
+      textureContext.putImageData(composedImage, 0, 0)
+      projectionCoverageRef.current = null
+      projectionFaceOwnershipRef.current.clear()
       updateCanvasTexture(displayTextureRef.current)
       setTextureRevision(current => current + 1)
+      if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+        const rebuildDurationMs = performance.now() - rebuildStartedAt
+        console.debug(
+          `[Projection] Rebuild complete in ${rebuildDurationMs.toFixed(1)}ms `
+          + `(${visibleLayers.length} visible layer${visibleLayers.length === 1 ? '' : 's'})`
+        )
+      }
       if (announce) {
         setFeedback(visibleLayers.length > 0
           ? `Projection stack rebuilt (${visibleLayers.length} projection${visibleLayers.length === 1 ? '' : 's'}).`
@@ -4985,6 +5748,8 @@ export default function MeshEditorPage() {
     projectionLayers.map(layer => [
       layer.id,
       layer.visible === false ? 0 : 1,
+      layer.opacity ?? 1,
+      layer.blendMode || 'source-over',
       layer.blendPixels ?? '',
       layer.cropBorder ?? ''
     ].join(':')).join('|')
@@ -5055,16 +5820,7 @@ export default function MeshEditorPage() {
     textureCanvas.height = clampedSize
     const textureCtx = textureCanvas.getContext('2d')
     textureCtx.clearRect(0, 0, clampedSize, clampedSize)
-
-    // Paint a checkerboard so unpainted UV areas are visually distinguishable
-    // from textured areas rather than appearing as solid black.
-    const cellSize = Math.max(16, Math.round(clampedSize / 64))
-    for (let cy = 0; cy < clampedSize; cy += cellSize) {
-      for (let cx = 0; cx < clampedSize; cx += cellSize) {
-        textureCtx.fillStyle = (((cx / cellSize) + (cy / cellSize)) % 2 === 0) ? '#585858' : '#3a3a3a'
-        textureCtx.fillRect(cx, cy, cellSize, cellSize)
-      }
-    }
+    drawProjectionCheckerboard(textureCtx, clampedSize, clampedSize)
 
     if (texturableMesh.maskCanvas) {
       texturableMesh.maskCanvas.width = clampedSize
@@ -5228,6 +5984,12 @@ export default function MeshEditorPage() {
       projectionLayerDataRef.current.set(layerId, {
         camera: projectionCamera.clone(),
         patchCanvas,
+        bakedCanvas: null,
+        bakeSignature: '',
+        coverageMask: null,
+        ownershipMask: null,
+        sharedSeamMask: null,
+        confidenceMap: null,
         generatedAsset: generatedPatchAsset,
         sendResolution,
         cropBorder: initialCropBorder
@@ -5238,6 +6000,8 @@ export default function MeshEditorPage() {
         {
           id: layerId,
           name: layerName,
+          opacity: 1,
+          blendMode: 'source-over',
           blendPixels: initialBlendPixels,
           cropBorder: initialCropBorder,
           visible: true,
@@ -7132,6 +7896,31 @@ export default function MeshEditorPage() {
                           <div className="mesh-editor-layer-card__row">
                             <span>Crop</span>
                             <strong>{draftCropBorder}px</strong>
+                          </div>
+                          <div className="mesh-editor-layer-card__row">
+                            <span>Opacity</span>
+                            <input
+                              type="range" min="0" max="1" step="0.01"
+                              value={layer.opacity ?? 1}
+                              onChange={e => handleUpdateProjectionLayer(layer.id, { opacity: Number(e.target.value) })}
+                              disabled={projectionRebuilding}
+                            />
+                          </div>
+                          <div className="mesh-editor-layer-card__row">
+                            <span>Alpha</span>
+                            <strong>{Math.round((layer.opacity ?? 1) * 100)}%</strong>
+                          </div>
+                          <div className="mesh-editor-layer-card__row">
+                            <span>Blend</span>
+                            <select
+                              value={layer.blendMode || 'source-over'}
+                              onChange={e => handleUpdateProjectionLayer(layer.id, { blendMode: e.target.value })}
+                              disabled={projectionRebuilding}
+                            >
+                              {PAINT_BLEND_MODES.map(mode => (
+                                <option key={mode.value} value={mode.value}>{mode.label}</option>
+                              ))}
+                            </select>
                           </div>
                           <div className="mesh-editor-layer-card__row">
                             <span>Capture</span>

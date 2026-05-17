@@ -21,6 +21,124 @@ if (THREE.Mesh.prototype.raycast !== acceleratedRaycast) {
 
 const PROJECTED_PATCH_ROW_BATCH = 16
 const PROJECTED_PATCH_PROGRESS_INTERVAL_MS = 125
+const DEPTH_PREPASS_EPSILON = 0.003
+
+let sharedDepthPrepassRenderer = null
+let sharedDepthPrepassTarget = null
+let sharedDepthPrepassMaterial = null
+let sharedDepthPrepassPixels = null
+
+function getDepthPrepassResources(width, height) {
+  const safeWidth = Math.max(1, Math.round(width || 1))
+  const safeHeight = Math.max(1, Math.round(height || 1))
+
+  if (!sharedDepthPrepassRenderer) {
+    sharedDepthPrepassRenderer = new THREE.WebGLRenderer({
+      antialias: false,
+      alpha: false,
+      preserveDrawingBuffer: false,
+      powerPreference: 'high-performance'
+    })
+    sharedDepthPrepassRenderer.setPixelRatio(1)
+  }
+
+  if (!sharedDepthPrepassTarget || sharedDepthPrepassTarget.width !== safeWidth || sharedDepthPrepassTarget.height !== safeHeight) {
+    sharedDepthPrepassTarget?.dispose?.()
+    sharedDepthPrepassTarget = new THREE.WebGLRenderTarget(safeWidth, safeHeight, {
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      depthBuffer: true,
+      stencilBuffer: false
+    })
+  }
+
+  if (!sharedDepthPrepassMaterial) {
+    sharedDepthPrepassMaterial = new THREE.MeshDepthMaterial({
+      depthPacking: THREE.RGBADepthPacking,
+      side: THREE.FrontSide,
+      blending: THREE.NoBlending
+    })
+  }
+
+  const requiredBytes = safeWidth * safeHeight * 4
+  if (!sharedDepthPrepassPixels || sharedDepthPrepassPixels.length !== requiredBytes) {
+    sharedDepthPrepassPixels = new Uint8Array(requiredBytes)
+  }
+
+  sharedDepthPrepassRenderer.setSize(safeWidth, safeHeight, false)
+
+  return {
+    width: safeWidth,
+    height: safeHeight,
+    renderer: sharedDepthPrepassRenderer,
+    target: sharedDepthPrepassTarget,
+    material: sharedDepthPrepassMaterial,
+    pixels: sharedDepthPrepassPixels
+  }
+}
+
+function unpackRgbDepth(r, g, b, a) {
+  const rf = r / 255
+  const gf = g / 255
+  const bf = b / 255
+  const af = a / 255
+  // Matches three.js unpackRGBAToDepth (no extra 255/256 scaling).
+  return rf / (256 * 256 * 256) + gf / (256 * 256) + bf / 256 + af
+}
+
+function samplePackedDepth(depthPrepass, screenX, screenY) {
+  if (!depthPrepass?.pixels || !depthPrepass.width || !depthPrepass.height) {
+    return NaN
+  }
+
+  const x = Math.max(0, Math.min(depthPrepass.width - 1, Math.floor(screenX)))
+  const yTop = Math.max(0, Math.min(depthPrepass.height - 1, Math.floor(screenY)))
+  const y = depthPrepass.height - 1 - yTop
+  const idx = (y * depthPrepass.width + x) * 4
+  const pixels = depthPrepass.pixels
+  return unpackRgbDepth(pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3])
+}
+
+function captureDepthPrepass({ meshes, camera, width, height }) {
+  if (!Array.isArray(meshes) || meshes.length === 0 || !camera || !width || !height) {
+    return null
+  }
+
+  try {
+    const resources = getDepthPrepassResources(width, height)
+    const scene = new THREE.Scene()
+
+    meshes.forEach(mesh => {
+      if (!mesh?.geometry) {
+        return
+      }
+
+      const depthMesh = new THREE.Mesh(mesh.geometry, resources.material)
+      depthMesh.matrixWorld.copy(mesh.matrixWorld)
+      depthMesh.matrixAutoUpdate = false
+      depthMesh.frustumCulled = false
+      scene.add(depthMesh)
+    })
+
+    camera.updateMatrixWorld?.(true)
+    resources.renderer.setRenderTarget(resources.target)
+    resources.renderer.setClearColor(0x000000, 1)
+    resources.renderer.clear(true, true, true)
+    resources.renderer.render(scene, camera)
+    resources.renderer.readRenderTargetPixels(resources.target, 0, 0, resources.width, resources.height, resources.pixels)
+    resources.renderer.setRenderTarget(null)
+
+    return {
+      width: resources.width,
+      height: resources.height,
+      pixels: resources.pixels
+    }
+  } catch {
+    return null
+  }
+}
 
 function getExtensionFromUrl(url = '') {
   const sanitizedUrl = String(url).split('?')[0].toLowerCase()
@@ -1438,7 +1556,9 @@ export async function accumulateProjectedPatch({
   faceOwnershipMap = null,
   faceLockPolicy = 'none',
   faceLockCoverageThreshold = 0.7,
-  faceLockFacingThreshold = 0.45
+  faceLockFacingThreshold = 0.45,
+  occlusionMode = 'raycast',
+  cullBackfaces = true
 }) {
   if (!root || !camera || !maskCanvas || !bbox || !patchImage || !accumulatedColor || !accumulatedWeight) {
     return { processedSamples: 0, appliedSamples: 0, activePixelCount: 0 }
@@ -1490,9 +1610,6 @@ export async function accumulateProjectedPatch({
   const clampedUnmatteStrength = Math.max(0, Math.min(1, Number(unmatteStrength) || 0))
   const clampedMinMaskAlpha = Math.max(0, Math.min(1, Number(minMaskAlpha) || 0))
 
-  const raycaster = new THREE.Raycaster()
-  raycaster.firstHitOnly = true
-  const pointer = new THREE.Vector2()
   const activePixelCount = countActiveProjectionPixels(maskData)
   const coverageWeights = buildCoverageBlendWeights(coverageMap, textureWidth, textureHeight, blendPixels)
   const touchedCoverage = markCoverage && coverageMap && coverageMap.length === textureWidth * textureHeight
@@ -1503,6 +1620,32 @@ export async function accumulateProjectedPatch({
   camera.updateMatrixWorld?.(true)
   root.updateMatrixWorld?.(true)
   const projectableMeshes = ensureRaycastAcceleration(root, textureKey)
+  const hasDeformingMeshes = projectableMeshes.some(mesh => (
+    Boolean(mesh?.isSkinnedMesh)
+    || (Array.isArray(mesh?.morphTargetInfluences) && mesh.morphTargetInfluences.length > 0)
+  ))
+
+  const requestedOcclusionMode = String(occlusionMode || 'auto').toLowerCase()
+  const allowDepthPrepassOcclusion = (requestedOcclusionMode === 'auto' || requestedOcclusionMode === 'depth-prepass')
+    && !hasDeformingMeshes
+  const depthPrepass = allowDepthPrepassOcclusion
+    ? captureDepthPrepass({
+      meshes: projectableMeshes,
+      camera,
+      width: maskCanvas.width,
+      height: maskCanvas.height
+    })
+    : null
+  const useDepthPrepassOcclusion = Boolean(depthPrepass)
+  const useRaycastOcclusion = !useDepthPrepassOcclusion
+    && (requestedOcclusionMode === 'auto' || requestedOcclusionMode === 'raycast' || requestedOcclusionMode === 'depth-prepass')
+  const useNoOcclusion = !useDepthPrepassOcclusion && !useRaycastOcclusion
+
+  const raycaster = useRaycastOcclusion ? new THREE.Raycaster() : null
+  if (raycaster) {
+    raycaster.firstHitOnly = true
+  }
+  const pointer = useRaycastOcclusion ? new THREE.Vector2() : null
 
   if (activePixelCount === 0 || projectableMeshes.length === 0) {
     return {
@@ -1586,14 +1729,16 @@ export async function accumulateProjectedPatch({
         vB.fromBufferAttribute(posAttr, i1).applyMatrix4(matrixWorld)
         vC.fromBufferAttribute(posAttr, i2).applyMatrix4(matrixWorld)
 
-        // Backface cull
+        // Optional backface cull. Some imported assets have mixed or inverted
+        // winding; allowing two-sided projection prevents those meshes from
+        // being almost fully rejected.
         edge1.subVectors(vB, vA)
         edge2.subVectors(vC, vA)
         triNormal.crossVectors(edge1, edge2)
         triCenter.copy(vA).add(vB).add(vC).multiplyScalar(1 / 3)
         viewVec.subVectors(triCenter, camWorldPos)
         const faceDot = triNormal.dot(viewVec)
-        if (faceDot > 0) {
+        if (cullBackfaces && faceDot > 0) {
           processedSamples += 1
           continue
         }
@@ -1608,7 +1753,7 @@ export async function accumulateProjectedPatch({
           && (faceDot * faceDot) / (nLenSq * vLenSq) < grazingCoverageThreshold * grazingCoverageThreshold
 
         const facingCos = nLenSq > 0 && vLenSq > 0
-          ? Math.max(0, -faceDot / Math.sqrt(nLenSq * vLenSq))
+          ? Math.max(0, (cullBackfaces ? -faceDot : Math.abs(faceDot)) / Math.sqrt(nLenSq * vLenSq))
           : 0
         const facingWeight = Math.pow(facingCos, Math.max(1, facingPower))
 
@@ -1719,17 +1864,33 @@ export async function accumulateProjectedPatch({
               continue
             }
 
-            // Occlusion test: raycast through this screen point and verify our
-            // 3D point is the closest visible surface.
-            pointer.set(projTmp.x, projTmp.y)
-            raycaster.setFromCamera(pointer, camera)
-            const [hit] = raycaster.intersectObjects(projectableMeshes, false)
-            if (!hit) {
-              continue
-            }
-            const camDist = camWorldPos.distanceTo(tmpWorld)
-            if (hit.distance < camDist - occlusionEps) {
-              continue
+            // Occlusion test: prefer GPU depth prepass when available, then
+            // fall back to BVH raycast for compatibility.
+            if (useDepthPrepassOcclusion) {
+              const sampledDepth = samplePackedDepth(depthPrepass, sxF, syF)
+              if (!Number.isFinite(sampledDepth)) {
+                continue
+              }
+
+              const projectedDepth = projTmp.z * 0.5 + 0.5
+              if (projectedDepth > sampledDepth + DEPTH_PREPASS_EPSILON) {
+                continue
+              }
+            } else if (useRaycastOcclusion && raycaster && pointer) {
+              pointer.set(projTmp.x, projTmp.y)
+              raycaster.setFromCamera(pointer, camera)
+              const [hit] = raycaster.intersectObjects(projectableMeshes, false)
+              if (!hit) {
+                continue
+              }
+              const camDist = camWorldPos.distanceTo(tmpWorld)
+              if (hit.distance < camDist - occlusionEps) {
+                continue
+              }
+            } else if (useNoOcclusion) {
+              // Intentionally skip visibility filtering. Used as a safety
+              // fallback for meshes/camera states where occlusion heuristics
+              // become over-restrictive and reject almost all samples.
             }
 
             const idx = (py * textureWidth + px) * 4
@@ -1886,7 +2047,10 @@ export async function accumulateProjectedPatch({
       processedSamples,
       appliedSamples,
       coveredPixels: touchedCoverageIndices?.length || 0,
-      lockedFaces
+      lockedFaces,
+      occlusionModeUsed: useDepthPrepassOcclusion
+        ? 'depth-prepass'
+        : (useRaycastOcclusion ? 'raycast' : 'none')
     }
   }
 }
