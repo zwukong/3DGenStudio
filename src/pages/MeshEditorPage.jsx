@@ -78,6 +78,9 @@ import './MeshEditorPage.css'
 import AssetSelectorModal from '../components/AssetSelectorModal';
 import SculptToolsPanel from '../components/SculptToolsPanel';
 
+const AUTO_PROJECTION_SEAM_SAFE_CROP_PX = 2
+const AUTO_PROJECTION_SEAM_SAFE_BLEND_PX = 10
+
 function getRectangleBounds(startPoint, endPoint) {
   return {
     left: Math.min(startPoint.x, endPoint.x),
@@ -1433,6 +1436,147 @@ function createProjectionCropMaskCanvasFromPatch(patchCanvas, cropBorder = 0) {
     // Add a tiny automatic erosion in dark-matte cases so users do not need
     // to bump crop border manually for common black fringe artifacts.
     borderPx = Math.max(borderPx, 1)
+  }
+
+  // Gradient-aware silhouette ring suppression:
+  // If a faint matte line remains, reject only the first 1-2 interior pixels
+  // where we detect a strong border->interior brightness jump. This keeps
+  // interior detail intact while cleaning seam-colored halos.
+  {
+    const ring1 = new Uint8Array(pixelCount)
+    const ring2 = new Uint8Array(pixelCount)
+
+    const touchesOutside4 = (x, y) => {
+      const i = y * width + x
+      if (!mask[i]) {
+        return false
+      }
+      if (x === 0 || !mask[i - 1]) return true
+      if (x + 1 >= width || !mask[i + 1]) return true
+      if (y === 0 || !mask[i - width]) return true
+      if (y + 1 >= height || !mask[i + width]) return true
+      return false
+    }
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const i = y * width + x
+        if (mask[i] && touchesOutside4(x, y)) {
+          ring1[i] = 1
+        }
+      }
+    }
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const i = y * width + x
+        if (!mask[i] || ring1[i]) {
+          continue
+        }
+
+        let nearRing1 = false
+        for (let oy = -1; oy <= 1 && !nearRing1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            if (!ox && !oy) {
+              continue
+            }
+            const nx = x + ox
+            const ny = y + oy
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+              continue
+            }
+            if (ring1[ny * width + nx]) {
+              nearRing1 = true
+              break
+            }
+          }
+        }
+
+        if (nearRing1) {
+          ring2[i] = 1
+        }
+      }
+    }
+
+    const removed = new Uint8Array(pixelCount)
+    const maxDark = Math.max(30, Math.min(124, Math.round(borderMeanMax + 34)))
+    const maxChroma = 30
+    const gradientThreshold = darkMatteLikely ? 7 : 10
+    const contrastThreshold = darkMatteLikely ? 12 : 16
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const i = y * width + x
+        if (!mask[i] || (!ring1[i] && !ring2[i])) {
+          continue
+        }
+
+        const idx = i * 4
+        const r = patchData[idx]
+        const g = patchData[idx + 1]
+        const b = patchData[idx + 2]
+        const selfMax = Math.max(r, g, b)
+        const selfMin = Math.min(r, g, b)
+        const selfLuma = 0.299 * r + 0.587 * g + 0.114 * b
+
+        if (selfMax > maxDark || (selfMax - selfMin) > maxChroma) {
+          continue
+        }
+
+        let insideCount = 0
+        let insideLumaSum = 0
+        let insideLumaMax = 0
+
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            if (!ox && !oy) {
+              continue
+            }
+            const nx = x + ox
+            const ny = y + oy
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+              continue
+            }
+            const ni = ny * width + nx
+            if (!mask[ni]) {
+              continue
+            }
+            // Compare against a more interior sample so we only suppress true
+            // edge halos, not legitimate dark texture detail.
+            if (ring1[ni]) {
+              continue
+            }
+
+            const nIdx = ni * 4
+            const nr = patchData[nIdx]
+            const ng = patchData[nIdx + 1]
+            const nb = patchData[nIdx + 2]
+            const nl = 0.299 * nr + 0.587 * ng + 0.114 * nb
+            insideLumaSum += nl
+            insideLumaMax = Math.max(insideLumaMax, nl)
+            insideCount += 1
+          }
+        }
+
+        if (insideCount < 2) {
+          continue
+        }
+
+        const insideLumaMean = insideLumaSum / insideCount
+        const meanGradient = insideLumaMean - selfLuma
+        const maxContrast = insideLumaMax - selfLuma
+
+        if (meanGradient >= gradientThreshold || maxContrast >= contrastThreshold) {
+          removed[i] = 1
+        }
+      }
+    }
+
+    for (let i = 0; i < pixelCount; i += 1) {
+      if (removed[i]) {
+        mask[i] = 0
+      }
+    }
   }
 
   if (borderPx > 0) {
@@ -4757,7 +4901,9 @@ export default function MeshEditorPage() {
         projectionCamera.updateProjectionMatrix?.()
         projectionCamera.updateMatrixWorld?.(true)
 
-        const maskCanvas = createProjectionCropMaskCanvasFromPatch(patchCanvas, layer.cropBorder || 0)
+        const effectiveCropBorder = Math.max(AUTO_PROJECTION_SEAM_SAFE_CROP_PX, layer.cropBorder || 0)
+        const effectiveBlendPixels = Math.max(AUTO_PROJECTION_SEAM_SAFE_BLEND_PX, layer.blendPixels || 0)
+        const maskCanvas = createProjectionCropMaskCanvasFromPatch(patchCanvas, effectiveCropBorder)
         const accumulatedColor = new Float32Array(texW * texH * 4)
         const accumulatedWeight = new Float32Array(texW * texH)
         const previousCoverageMap = new Uint8Array(coverageMap)
@@ -4776,7 +4922,7 @@ export default function MeshEditorPage() {
           textureWidth: texW,
           textureHeight: texH,
           coverageMap,
-          blendPixels: layer.blendPixels,
+          blendPixels: effectiveBlendPixels,
           markCoverage: true,
           binaryMask: false,
           grazingCoverageThreshold: 0.15,
@@ -4807,9 +4953,9 @@ export default function MeshEditorPage() {
           textureCanvas,
           accumulatedColor,
           accumulatedWeight,
-          gapFillRadius: Math.max(2, Math.round((layer.blendPixels || 0) / 2)),
+          gapFillRadius: Math.max(2, Math.round(effectiveBlendPixels / 2)),
           previousCoverageMap,
-          boundaryBlendPixels: layer.blendPixels || 0,
+          boundaryBlendPixels: effectiveBlendPixels,
           boundaryOnlyBlend: true
         })
       }
@@ -4835,13 +4981,22 @@ export default function MeshEditorPage() {
     }
   }, [texturableMesh])
 
+  const projectionLayersForRebuild = useMemo(() => projectionLayers, [
+    projectionLayers.map(layer => [
+      layer.id,
+      layer.visible === false ? 0 : 1,
+      layer.blendPixels ?? '',
+      layer.cropBorder ?? ''
+    ].join(':')).join('|')
+  ])
+
   useEffect(() => {
     if (!projectionStarted || !texturableMesh?.textureCanvas) {
       return
     }
 
-    void rebuildProjectionTexture(projectionLayers, { announce: false })
-  }, [projectionLayers, projectionStarted, rebuildProjectionTexture, texturableMesh])
+    void rebuildProjectionTexture(projectionLayersForRebuild, { announce: false })
+  }, [projectionLayersForRebuild, projectionStarted, rebuildProjectionTexture, texturableMesh])
 
   const handleUpdateProjectionLayer = useCallback((id, updates) => {
     setProjectionLayers(current => current.map(layer => layer.id === id ? { ...layer, ...updates } : layer))
@@ -5064,6 +5219,9 @@ export default function MeshEditorPage() {
       patchCanvas.height = sendResolution
       patchCanvas.getContext('2d').drawImage(patchImage, 0, 0, sendResolution, sendResolution)
 
+      const initialCropBorder = Math.max(AUTO_PROJECTION_SEAM_SAFE_CROP_PX, 0)
+      const initialBlendPixels = Math.max(AUTO_PROJECTION_SEAM_SAFE_BLEND_PX, projectionBlendPixels)
+
       projectionLayerCounterRef.current += 1
       const layerId = `projection-${Date.now()}-${projectionLayerCounterRef.current}`
       const layerName = `Projection ${projectionLayerCounterRef.current}`
@@ -5072,7 +5230,7 @@ export default function MeshEditorPage() {
         patchCanvas,
         generatedAsset: generatedPatchAsset,
         sendResolution,
-        cropBorder: 0
+        cropBorder: initialCropBorder
       })
 
       setProjectionLayers(current => ([
@@ -5080,8 +5238,8 @@ export default function MeshEditorPage() {
         {
           id: layerId,
           name: layerName,
-          blendPixels: projectionBlendPixels,
-          cropBorder: 0,
+          blendPixels: initialBlendPixels,
+          cropBorder: initialCropBorder,
           visible: true,
           sendResolution
         }
