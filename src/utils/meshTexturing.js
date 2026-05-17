@@ -1471,6 +1471,7 @@ export async function accumulateProjectedPatch({
     const edge1 = new THREE.Vector3(), edge2 = new THREE.Vector3()
     const viewVec = new THREE.Vector3()
     const tmpWorld = new THREE.Vector3()
+    const triCenter = new THREE.Vector3()
     const projTmp = new THREE.Vector3()
     const uvAv = new THREE.Vector2(), uvBv = new THREE.Vector2(), uvCv = new THREE.Vector2()
 
@@ -1505,7 +1506,8 @@ export async function accumulateProjectedPatch({
         edge1.subVectors(vB, vA)
         edge2.subVectors(vC, vA)
         triNormal.crossVectors(edge1, edge2)
-        viewVec.subVectors(vA, camWorldPos)
+        triCenter.copy(vA).add(vB).add(vC).multiplyScalar(1 / 3)
+        viewVec.subVectors(triCenter, camWorldPos)
         const faceDot = triNormal.dot(viewVec)
         if (faceDot > 0) {
           processedSamples += 1
@@ -1597,6 +1599,10 @@ export async function accumulateProjectedPatch({
             if (coverageWeight <= 1e-6) {
               continue
             }
+            const overlapWeight = isPreviouslyCovered ? (coverageWeight * coverageWeight) : coverageWeight
+            if (isPreviouslyCovered && overlapWeight <= 0.02) {
+              continue
+            }
 
             // Interpolated 3D world position of this UV texel
             tmpWorld.set(
@@ -1646,7 +1652,7 @@ export async function accumulateProjectedPatch({
               }
 
               const angleWeight = isPreviouslyCovered ? facingWeight : 1
-              const weight = coverageWeight * alphaNorm * angleWeight
+              const weight = overlapWeight * alphaNorm * angleWeight
               accumulatedColor[idx]     = patchData[nearestIdx] * weight
               accumulatedColor[idx + 1] = patchData[nearestIdx + 1] * weight
               accumulatedColor[idx + 2] = patchData[nearestIdx + 2] * weight
@@ -1691,7 +1697,7 @@ export async function accumulateProjectedPatch({
               }
 
               const angleWeight = isPreviouslyCovered ? facingWeight : 1
-              const weight = maskAlpha * clampedViewOpacity * coverageWeight * sampleAlphaNorm * angleWeight
+              const weight = maskAlpha * clampedViewOpacity * overlapWeight * sampleAlphaNorm * angleWeight
               if (weight <= 0.0025) {
                 continue
               }

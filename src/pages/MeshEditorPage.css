@@ -146,7 +146,8 @@
   background: var(--surface-container, #1e1e22);
   border: 1px solid var(--outline-variant, #2a2a30);
   border-radius: 12px;
-  max-height: clamp(760px, calc(100vh - 185px), 1400px);
+  min-height: 0;
+  height: clamp(760px, calc(100vh - 185px), 1400px);
   overflow: hidden;
 }
 
@@ -156,9 +157,39 @@
   justify-content: space-between;
 }
 
+.mesh-editor-layers-panel__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .mesh-editor-layers-panel__title {
   font-weight: 600;
   font-size: 0.95rem;
+}
+
+.mesh-editor-layers-panel__apply-all-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid rgba(108, 140, 255, 0.45);
+  border-radius: 999px;
+  background: rgba(108, 140, 255, 0.16);
+  color: var(--on-surface);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mesh-editor-layers-panel__apply-all-btn:hover:not(:disabled) {
+  background: rgba(108, 140, 255, 0.24);
+}
+
+.mesh-editor-layers-panel__apply-all-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .mesh-editor-layers-panel__list {
@@ -169,6 +200,9 @@
   flex: 1;
   min-height: 0;
   padding-right: 4px;
+  padding-bottom: 0.85rem;
+  scroll-padding-bottom: 1rem;
+  overscroll-behavior: contain;
 }
 
 .mesh-editor-layer-card {
@@ -355,6 +389,17 @@
 .mesh-editor-layer-card__apply-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.mesh-editor-layer-card__dirty-note {
+  align-self: flex-start;
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(108, 140, 255, 0.12);
+  color: var(--primary, #ac89ff);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .mesh-editor-rebuild-progress {

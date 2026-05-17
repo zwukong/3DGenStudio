@@ -4618,8 +4618,8 @@ export default function MeshEditorPage() {
           markCoverage: true,
           binaryMask: false,
           grazingCoverageThreshold: 0.15,
-          minFacingCos: 0.2,
-          facingPower: 1.75,
+          minFacingCos: 0.3,
+          facingPower: 2.2,
           onProgress: progress => {
             const overall = (layerIndex + progress) / Math.max(1, visibleLayers.length)
             setProjectionRebuildProgress(overall)
@@ -4697,6 +4697,23 @@ export default function MeshEditorPage() {
     })
   }, [])
 
+  const handleApplyAllProjectionLayers = useCallback(() => {
+    setProjectionLayers(current => current.map(layer => {
+      const draft = projectionLayerDrafts[layer.id]
+      if (!draft) {
+        return layer
+      }
+
+      return {
+        ...layer,
+        blendPixels: draft.blendPixels,
+        cropBorder: draft.cropBorder
+      }
+    }))
+    setProjectionLayerDrafts({})
+    setFeedback('Applied all modified projections.')
+  }, [projectionLayerDrafts])
+
   const handleStartProjectionSession = useCallback(() => {
     if (!texturableMesh?.textureCanvas) {
       setFeedback('Projection mode requires a texturable mesh.')
@@ -4749,6 +4766,18 @@ export default function MeshEditorPage() {
     setTextureRevision(current => current + 1)
     setFeedback(`Projection session started with ${clampedSize}x${clampedSize} texture.`)
   }, [projectionTextureSize, texturableMesh])
+
+  const modifiedProjectionCount = Object.entries(projectionLayerDrafts).reduce((count, [layerId, draft]) => {
+    const layer = projectionLayers.find(item => item.id === layerId)
+    if (!layer || !draft) {
+      return count
+    }
+
+    const layerBlendPixels = layer.blendPixels
+    const layerCropBorder = layer.cropBorder || 0
+    const isModified = draft.blendPixels !== layerBlendPixels || draft.cropBorder !== layerCropBorder
+    return count + (isModified ? 1 : 0)
+  }, 0)
 
   const handleRunProjectionWorkflow = useCallback(async () => {
     if (projecting || !projectionStarted || !projectionReady || !selectedProjectionWorkflow || !texturableMesh?.textureCanvas) {
@@ -6648,7 +6677,19 @@ export default function MeshEditorPage() {
               <aside className="mesh-editor-layers-panel">
                 <div className="mesh-editor-layers-panel__header">
                   <span className="mesh-editor-layers-panel__title">Projections</span>
-                  <span className="mesh-editor-panel__hint">{projectionLayers.length}</span>
+                  <div className="mesh-editor-layers-panel__header-actions">
+                    <span className="mesh-editor-panel__hint">{projectionLayers.length}</span>
+                    {modifiedProjectionCount > 0 && (
+                      <button
+                        type="button"
+                        className="mesh-editor-layers-panel__apply-all-btn"
+                        disabled={projectionRebuilding}
+                        onClick={handleApplyAllProjectionLayers}
+                      >
+                        Apply all ({modifiedProjectionCount})
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {projectionRebuilding && (
                   <div className="mesh-editor-rebuild-progress">
@@ -6743,7 +6784,7 @@ export default function MeshEditorPage() {
                           <div className="mesh-editor-layer-card__row">
                             <span>Crop border</span>
                             <input
-                              type="range" min="0" max={Math.max(0, Math.floor((layer.sendResolution || projectionViewResolution) / 2) - 1)} step="1"
+                              type="range" min="0" max="64" step="1"
                               value={draftCropBorder}
                               onChange={e => setProjectionLayerDrafts(prev => ({
                                 ...prev,
@@ -6764,21 +6805,7 @@ export default function MeshEditorPage() {
                             <strong>{layer.sendResolution}px</strong>
                           </div>
                           {isDirty && (
-                            <button
-                              type="button"
-                              className="mesh-editor-layer-card__apply-btn"
-                              disabled={projectionRebuilding}
-                              onClick={() => {
-                                handleUpdateProjectionLayer(layer.id, { blendPixels: draftBlendPixels, cropBorder: draftCropBorder })
-                                setProjectionLayerDrafts(prev => {
-                                  const next = { ...prev }
-                                  delete next[layer.id]
-                                  return next
-                                })
-                              }}
-                            >
-                              Apply
-                            </button>
+                            <div className="mesh-editor-layer-card__dirty-note">Modified</div>
                           )}
                         </div>
                       )
