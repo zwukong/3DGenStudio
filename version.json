@@ -1,4 +1,4 @@
 {
-	"version": "0.8.1",
-	"message": "New dependencies have been added. Don't forget to run: npm install"
+	"version": "0.9.0",
+	"message": "Mesh Editor: New Projection mode"
 }
