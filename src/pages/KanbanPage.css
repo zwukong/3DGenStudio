@@ -543,6 +543,36 @@
   z-index: 2;
 }
 
+.image-card__mesh-edit-btn {
+  position: absolute;
+  bottom: 0.4rem;
+  right: 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.55rem;
+  border: none;
+  border-radius: 999px;
+  background: rgba(143, 245, 255, 0.18);
+  color: var(--primary);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  z-index: 3;
+  transition: all var(--transition-base);
+}
+
+.image-card__mesh-edit-btn:hover:not(:disabled) {
+  background: rgba(143, 245, 255, 0.32);
+  color: var(--on-primary, #001f24);
+}
+
+.image-card__mesh-edit-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .image-card__edit-preview-indicator {
   position: absolute;
   top: 0.4rem;

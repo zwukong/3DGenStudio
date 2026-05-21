@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useMemo, useRef, useCallback  } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import { useProjects } from '../context/ProjectContext'
 import { useSettings } from '../context/SettingsContext.shared'
 import { useNotifications } from '../context/NotificationContext'
@@ -134,8 +134,22 @@ function createComfyExecutionId(prefix = 'comfy') {
   return `${prefix}-${Date.now()}-${Math.round(Math.random() * 1E9)}`
 }
 
+function buildMeshEditorPath(asset, projectId, returnTo) {
+  const query = new URLSearchParams({
+    assetId: String(asset?.id || ''),
+    filePath: asset?.filePath || asset?.filename || '',
+    url: asset?.filename ? `http://localhost:3001/assets/${encodeURI(asset.filename)}` : '',
+    name: asset?.name || 'Mesh',
+    projectId: projectId ? String(projectId) : '',
+    returnTo: returnTo || ''
+  })
+
+  return `/mesh-editor?${query.toString()}`
+}
+
 export default function KanbanPage() {
   const { projectId } = useParams()
+  const navigate = useNavigate()
   const {
     getProject,
     getProjectAssets,
@@ -2425,6 +2439,22 @@ export default function KanbanPage() {
                   <div className="image-card__edit-preview-indicator font-label">
                     3D MESH
                   </div>
+                )}
+
+                {useAssetCarousel && previewType === 'mesh' && sourceAsset?.id && [3, 4, 5].includes(card.kanbanColumnId) && (
+                  <button
+                    type="button"
+                    className="image-card__mesh-edit-btn"
+                    disabled={cardLocked}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      navigate(buildMeshEditorPath(sourceAsset, projectId, `/projects/${projectId}`))
+                    }}
+                    title="Edit mesh"
+                  >
+                    <span className="material-symbols-outlined" style={{ fontSize: '14px' }}>edit</span>
+                    EDIT
+                  </button>
                 )}
 
                 {showAttributes && !useAssetCarousel && displayItems.length > 1 && (

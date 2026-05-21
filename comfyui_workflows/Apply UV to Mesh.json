@@ -1,0 +1,83 @@
+{
+  "1": {
+    "inputs": {
+      "glb_path": ""
+    },
+    "class_type": "Trellis2LoadMesh",
+    "_meta": {
+      "title": "Trellis2 - Load Mesh"
+    }
+  },
+  "2": {
+    "inputs": {
+      "mesh_cluster_threshold_cone_half_angle_rad": 60,
+      "mesh_cluster_refine_iterations": 0,
+      "mesh_cluster_global_iterations": 1,
+      "mesh_cluster_smooth_strength": 1,
+      "trimesh": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "Trellis2UnWrapTrimesh",
+    "_meta": {
+      "title": "Trellis2 - UnWrap Trimesh"
+    }
+  },
+  "3": {
+    "inputs": {
+      "texture": "base_color",
+      "trimesh": [
+        "2",
+        0
+      ],
+      "image": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "Hy3DSetMeshPBRTextures",
+    "_meta": {
+      "title": "Hy3D Set Mesh PBR Textures"
+    }
+  },
+  "4": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1,
+      "color": 0
+    },
+    "class_type": "EmptyImage",
+    "_meta": {
+      "title": "EmptyImage"
+    }
+  },
+  "5": {
+    "inputs": {
+      "filename_prefix": "MeshWithUV",
+      "file_format": "glb",
+      "trimesh": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "Trellis2ExportMesh",
+    "_meta": {
+      "title": "Trellis2 - Export Mesh"
+    }
+  },
+  "6": {
+    "inputs": {
+      "model_file": [
+        "5",
+        0
+      ],
+      "image": ""
+    },
+    "class_type": "Preview3D",
+    "_meta": {
+      "title": "Preview 3D & Animation"
+    }
+  }
+}
