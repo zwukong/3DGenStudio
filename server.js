@@ -2742,7 +2742,7 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
     const workflowFiles = getComfyHistoryFiles(historyRecord, workflow.outputs);
 
     if (workflowFiles.length === 0) {
-      return res.status(502).json({ error: 'The ComfyUI workflow finished but no compatible files were returned' });
+      throw new Error('The ComfyUI workflow finished but no compatible files were returned');
     }
 
     const imageCardId = persistProcessingCard ? processingCardId : null;
@@ -5093,7 +5093,7 @@ app.post('/api/image-edits/comfy', async (req, res) => {
     const workflowImages = getComfyHistoryImages(historyRecord, workflow.outputs);
 
     if (workflowImages.length === 0) {
-      return res.status(502).json({ error: 'The ComfyUI workflow finished but no images were returned' });
+      throw new Error('The ComfyUI workflow finished but no images were returned');
     }
 
     const downloadedImages = await Promise.all(workflowImages.map(async workflowImage => {

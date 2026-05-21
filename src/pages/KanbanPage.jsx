@@ -585,6 +585,9 @@ export default function KanbanPage() {
         console.error('ComfyUI workflow failed:', err)
         setImageDraft(draft)
         showStatusMessage(err.message || 'ComfyUI workflow failed', 'error')
+        await refreshProjectAssets().catch(refreshErr => {
+          console.error('Failed to refresh project assets after ComfyUI workflow error:', refreshErr)
+        })
       } finally {
         closePendingComfyProgressSubscription()
         setPendingImageGeneration(null)
