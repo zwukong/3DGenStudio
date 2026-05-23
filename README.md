@@ -19,6 +19,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-05-23** | Mesh Editor : Projection mode can sent Textured/Untextured view to ComfyUI<br>Fixed delete a project |
 | **2026-05-21** | Fixed bugs |
 | **2026-05-20** | Mesh Editor: New Projection mode<br>Renamed Boolean mode by Displace |
 | **2026-05-15** | Mesh Editor: Fixed modifications applied between modes |
