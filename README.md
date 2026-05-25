@@ -93,6 +93,8 @@ Each stage feeds the next. Use **ComfyUI** workflows or external APIs at any ste
 2. **Modeling:** Basic features to edit the faces and vertices of your mesh, fix issues.
 3. **Sculpting:** Basic sculpting features (Standard, Clay, Inflate, Smooth, Flatten, Pinch, Grab).
 4. **Painting:** Paint directly on your mesh using brushes/images.
+5. **Displace:** Use a brush to displace the vertices with tessellation.
+6. **Projection:** With ComfyUI, project views on the mesh to get higher texture quality.
 
 ---
 
